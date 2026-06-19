@@ -179,9 +179,6 @@ export abstract class BaseClient {
                 this._logger.log(resultMessage.message ?? "");
             }
             else if (resultMessage instanceof DeviceNotificationMessage) {
-                this._logger.log(
-                    `[telemetry] Received device notification with ${resultMessage.devices.length} device(s)`,
-                );
                 this.onDeviceNotification.fire(resultMessage);
             }
         }
