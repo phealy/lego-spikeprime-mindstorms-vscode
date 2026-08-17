@@ -5,6 +5,7 @@ const CRC32_ALIGNMENT = 4;
 export const enum Command {
     ConnectToHub = "lego-spikeprime-mindstorms-vscode.connectToHub",
     DisconnectFromHub = "lego-spikeprime-mindstorms-vscode.disconnectFromHub",
+    SetHubName = "lego-spikeprime-mindstorms-vscode.setHubName",
     UploadProgram = "lego-spikeprime-mindstorms-vscode.uploadProgram",
 }
 
