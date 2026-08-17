@@ -31,11 +31,6 @@
             "default": false,
             "description": "Saves the result after importing files into current script."
           },
-          "legoSpikePrimeMindstorms.bleConnectionTimeoutSeconds": {
-            "type": "number",
-            "default": 5,
-            "description": "Timeout in seconds for which to scan for Bluetooth devices and then connect to the selected one."
-          },
           "legoSpikePrimeMindstorms.customPrepocessorPath": {
             "type": "string",
             "default": "",
@@ -59,6 +54,11 @@
       {
         "command": "lego-spikeprime-mindstorms-vscode.disconnectFromHub",
         "title": "LEGO Hub: Disconnect from Hub"
+      },
+      {
+        "command": "lego-spikeprime-mindstorms-vscode.setHubName",
+        "title": "LEGO Hub: Set Hub Name",
+        "enablement": "lego-spikeprime-mindstorms-vscode.isConnectedIn"
       },
       {
         "command": "lego-spikeprime-mindstorms-vscode.startProgram",

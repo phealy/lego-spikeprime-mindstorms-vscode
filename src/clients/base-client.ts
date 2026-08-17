@@ -7,14 +7,22 @@ import { ConsoleNotificationMessage } from "../messages/console-notification-mes
 import { DeviceNotificationMessage } from "../messages/device-notification";
 import { DeviceNotificationRequestMessage } from "../messages/device-notification-request";
 import { DeviceNotificationResponseMessage } from "../messages/device-notification-response";
+import { GetHubNameRequestMessage } from "../messages/get-hub-name-request-message";
+import { GetHubNameResponseMessage } from "../messages/get-hub-name-response-message";
 import { InfoResponseMessage } from "../messages/info-response-message";
 import { ProgramFlowNotificationMessage } from "../messages/program-flow-notification-message";
 import { ProgramFlowRequestMessage } from "../messages/program-flow-request-message";
 import { ProgramFlowResponseMessage } from "../messages/program-flow-response-message";
+import { SetHubNameRequestMessage } from "../messages/set-hub-name-request-message";
+import { SetHubNameResponseMessage } from "../messages/set-hub-name-response-message";
 import { StartFileUploadRequestMessage } from "../messages/start-file-upload-request-message";
 import { StartFileUploadResponseMessage } from "../messages/start-file-upload-response-message";
 import { TransferChunkRequestMessage } from "../messages/transfer-chunk-request-message";
 import { TransferChunkResponseMessage } from "../messages/transfer-chunk-response-message";
+
+export interface HubQuickPickItem extends vscode.QuickPickItem {
+    connectionId: string;
+}
 
 export abstract class BaseClient {
     public onClosed: vscode.EventEmitter<void> =
@@ -44,6 +52,9 @@ export abstract class BaseClient {
         }
         return this._infoResponse.maxChunkSize;
     }
+    public get hubName() {
+        return this._hubName;
+    }
 
     protected _logger: Logger;
     protected _pendingMessagesPromises = new Map<
@@ -54,12 +65,16 @@ export abstract class BaseClient {
         ]
     >();
     protected _infoResponse: InfoResponseMessage | undefined;
+    protected _hubName: string | undefined;
 
     constructor(logger: Logger) {
         this._logger = logger;
     }
 
-    public abstract list(): Promise<vscode.QuickPickItem[]>;
+    public abstract list(
+        onDidChange: (items: readonly HubQuickPickItem[]) => void,
+        cancellationToken: vscode.CancellationToken,
+    ): Promise<HubQuickPickItem[]>;
 
     public abstract connect(peripheralUuid: string): Promise<void>;
 
@@ -74,6 +89,35 @@ export abstract class BaseClient {
             ProgramFlowResponseMessage,
         );
         return response.IsAckIn;
+    }
+
+    public async setHubName(name: string) {
+        const response = await this.sendMessage<
+            SetHubNameRequestMessage,
+            SetHubNameResponseMessage
+        >(
+            new SetHubNameRequestMessage(name),
+            SetHubNameResponseMessage,
+        );
+
+        if (response.IsAckIn) {
+            this._hubName = name;
+        }
+
+        return response.IsAckIn;
+    }
+
+    public async loadHubName() {
+        const response = await this.sendMessage<
+            GetHubNameRequestMessage,
+            GetHubNameResponseMessage
+        >(
+            new GetHubNameRequestMessage(),
+            GetHubNameResponseMessage,
+        );
+        this._hubName = response.name;
+
+        return this._hubName;
     }
 
     public async startFileUpload(fileName: string, slot: number, crc: number) {
@@ -189,6 +233,7 @@ export abstract class BaseClient {
 
     protected onDisconnect() {
         this._infoResponse = undefined;
+        this._hubName = undefined;
         this._pendingMessagesPromises.clear();
 
         this.onClosed.fire();
@@ -208,6 +253,9 @@ function deserializeMessage(
         case DeviceNotificationResponseMessage.Id:
             message = new DeviceNotificationResponseMessage();
             break;
+        case GetHubNameResponseMessage.Id:
+            message = new GetHubNameResponseMessage();
+            break;
         case InfoResponseMessage.Id:
             message = new InfoResponseMessage();
             break;
@@ -218,6 +266,10 @@ function deserializeMessage(
 
         case ProgramFlowResponseMessage.Id:
             message = new ProgramFlowResponseMessage();
+            break;
+
+        case SetHubNameResponseMessage.Id:
+            message = new SetHubNameResponseMessage();
             break;
 
         case ConsoleNotificationMessage.Id:
