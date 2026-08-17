@@ -79,7 +79,7 @@ export class BleClient extends BaseClient {
                 }
 
                 try {
-                    const name = await this.getHubName(peripheral, cancellationToken);
+                    const name = await this.probeHubName(peripheral, cancellationToken);
                     if (name) {
                         item.label = `${name} (${address})`;
                         publishItems();
@@ -175,7 +175,7 @@ export class BleClient extends BaseClient {
         }
     }
 
-    private async getHubName(
+    private async probeHubName(
         peripheral: Peripheral,
         cancellationToken: vscode.CancellationToken,
     ): Promise<string | undefined> {

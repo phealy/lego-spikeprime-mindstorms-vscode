@@ -56,6 +56,11 @@
         "title": "LEGO Hub: Disconnect from Hub"
       },
       {
+        "command": "lego-spikeprime-mindstorms-vscode.setHubName",
+        "title": "LEGO Hub: Set Hub Name",
+        "enablement": "lego-spikeprime-mindstorms-vscode.isConnectedIn"
+      },
+      {
         "command": "lego-spikeprime-mindstorms-vscode.startProgram",
         "title": "LEGO Hub: Start Program",
         "icon": "$(run)"

@@ -4,6 +4,7 @@
 
 - Fix truncated Bluetooth console output and program progress notifications that remain open after a program stops immediately after starting.
 - Update Bluetooth hub search results as hubs are discovered, and show each hub's name and formatted MAC address.
+- Add a command to change the connected hub's name.
 
 ## 3.1.0 - 2025-06-22
 
