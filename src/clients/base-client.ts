@@ -7,6 +7,7 @@ import { ConsoleNotificationMessage } from "../messages/console-notification-mes
 import { DeviceNotificationMessage } from "../messages/device-notification";
 import { DeviceNotificationRequestMessage } from "../messages/device-notification-request";
 import { DeviceNotificationResponseMessage } from "../messages/device-notification-response";
+import { GetHubNameResponseMessage } from "../messages/get-hub-name-response-message";
 import { InfoResponseMessage } from "../messages/info-response-message";
 import { ProgramFlowNotificationMessage } from "../messages/program-flow-notification-message";
 import { ProgramFlowRequestMessage } from "../messages/program-flow-request-message";
@@ -15,6 +16,10 @@ import { StartFileUploadRequestMessage } from "../messages/start-file-upload-req
 import { StartFileUploadResponseMessage } from "../messages/start-file-upload-response-message";
 import { TransferChunkRequestMessage } from "../messages/transfer-chunk-request-message";
 import { TransferChunkResponseMessage } from "../messages/transfer-chunk-response-message";
+
+export interface HubQuickPickItem extends vscode.QuickPickItem {
+    connectionId: string;
+}
 
 export abstract class BaseClient {
     public onClosed: vscode.EventEmitter<void> =
@@ -59,7 +64,10 @@ export abstract class BaseClient {
         this._logger = logger;
     }
 
-    public abstract list(): Promise<vscode.QuickPickItem[]>;
+    public abstract list(
+        onDidChange: (items: readonly HubQuickPickItem[]) => void,
+        cancellationToken: vscode.CancellationToken,
+    ): Promise<HubQuickPickItem[]>;
 
     public abstract connect(peripheralUuid: string): Promise<void>;
 
@@ -207,6 +215,9 @@ function deserializeMessage(
             break;
         case DeviceNotificationResponseMessage.Id:
             message = new DeviceNotificationResponseMessage();
+            break;
+        case GetHubNameResponseMessage.Id:
+            message = new GetHubNameResponseMessage();
             break;
         case InfoResponseMessage.Id:
             message = new InfoResponseMessage();

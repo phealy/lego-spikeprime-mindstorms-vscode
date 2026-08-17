@@ -9,8 +9,8 @@ import * as vscode from "vscode";
 import { MessageFrameDecoder } from "../message-frame-decoder";
 import { InfoRequestMessage } from "../messages/info-request-message";
 import { InfoResponseMessage } from "../messages/info-response-message";
-import { setTimeoutAsync } from "../utils";
-import { BaseClient } from "./base-client";
+import { formatBluetoothAddress, setTimeoutAsync } from "../utils";
+import { BaseClient, HubQuickPickItem } from "./base-client";
 
 // Auto-select based on platform
 const noble = withBindings("default"); // 'hci', 'win', 'mac'
@@ -31,25 +31,68 @@ export class BleClient extends BaseClient {
     private _txCharacteristic: Characteristic | undefined;
     private readonly _messageFrameDecoder = new MessageFrameDecoder();
 
-    public async list() {
-        const result: vscode.QuickPickItem[] = [];
+    public async list(
+        onDidChange: (items: readonly HubQuickPickItem[]) => void,
+        cancellationToken: vscode.CancellationToken,
+    ) {
+        const items = new Map<string, HubQuickPickItem>();
+        let isScanning = false;
 
-        noble.on("discover", async (peripheral) => {
-            result.push({
-                label: peripheral.advertisement.localName,
-                description: peripheral.id,
+        const publishItems = () => onDidChange([...items.values()]);
+        const onScanStart = () => { isScanning = true; };
+        const onScanStop = () => { isScanning = false; };
+        const startScanning = async () => {
+            if (!isScanning && !cancellationToken.isCancellationRequested) {
+                await noble.startScanningAsync([SERVICE_UUID], false);
+            }
+        };
+        const stopScanning = async () => {
+            if (isScanning) {
+                await noble.stopScanningAsync();
+            }
+        };
+        const onDiscover = (peripheral: Peripheral) => {
+            if (items.has(peripheral.id)) {
+                return;
+            }
+
+            const address = formatBluetoothAddress(
+                peripheral.address && peripheral.address !== "unknown"
+                    ? peripheral.address
+                    : peripheral.id,
+            );
+            const advertisedName = peripheral.advertisement.localName?.trim();
+            const item: HubQuickPickItem = {
+                label: advertisedName ? `${advertisedName} (${address})` : address,
+                connectionId: peripheral.id,
+            };
+            items.set(peripheral.id, item);
+            publishItems();
+        };
+
+        noble.on("scanStart", onScanStart);
+        noble.on("scanStop", onScanStop);
+        noble.on("discover", onDiscover);
+        try {
+            await noble.waitForPoweredOnAsync();
+            await startScanning();
+            await new Promise<void>((resolve) => {
+                if (cancellationToken.isCancellationRequested) {
+                    resolve();
+                    return;
+                }
+
+                cancellationToken.onCancellationRequested(resolve);
             });
-        });
+        }
+        finally {
+            noble.removeListener("discover", onDiscover);
+            noble.removeListener("scanStart", onScanStart);
+            noble.removeListener("scanStop", onScanStop);
+            await stopScanning();
+        }
 
-        await noble.waitForPoweredOnAsync();
-        await noble.startScanningAsync([SERVICE_UUID]);
-
-        await setTimeoutAsync(() => {
-            noble.stopScanningAsync();
-            noble.removeAllListeners("discover");
-        }, (vscode.workspace.getConfiguration().get<number>("legoSpikePrimeMindstorms.bleConnectionTimeoutSeconds") || 5) * 1000);
-
-        return result;
+        return [...items.values()];
     }
 
     public async connect(peripheralUuid: string) {

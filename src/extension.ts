@@ -8,6 +8,7 @@ import * as shellQuote from "shell-quote";
 import { v7 } from "uuid";
 import * as vscode from "vscode";
 
+import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
 import {
@@ -36,6 +37,10 @@ const enum Client {
     Usb = "USB",
 }
 
+interface CombinedHubQuickPickItem extends HubQuickPickItem {
+    clientType: Client;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     // HACK: This is a workaround for https://github.com/pybricks/support/issues/2185
     const wasmFilePath = path.join(__dirname, "mpy-cross-v6.wasm");
@@ -46,36 +51,47 @@ export function activate(context: vscode.ExtensionContext) {
     registerSharedCommands(context);
 
     const provider = new LiveDataViewProvider(getClient);
+    let connectionAttemptInProgress = false;
 
     const connectToHubCommand = vscode.commands.registerCommand(
         Command.ConnectToHub,
         async () => {
+            if (connectionAttemptInProgress) {
+                return;
+            }
+
+            connectionAttemptInProgress = true;
             try {
-                const clientSelection = await vscode.window.showQuickPick(
-                    supportedClients,
-                    { canPickMany: false },
+                const searchBoth = vscode.workspace.getConfiguration().get<boolean>(
+                    "legoSpikePrimeMindstorms.automaticallySearchForBothBleAndUsbHubs",
+                    true,
                 );
-                if (!clientSelection) {
-                    return;
+                let clientType: Client;
+                let selection: HubQuickPickItem | undefined;
+
+                if (searchBoth) {
+                    const combinedSelection = await showCombinedHubQuickPick();
+                    if (!combinedSelection) {
+                        return;
+                    }
+
+                    clientType = combinedSelection.clientType;
+                    selection = combinedSelection;
+                    initializeClient(clientType);
                 }
+                else {
+                    const clientSelection = await vscode.window.showQuickPick(
+                        supportedClients,
+                        { canPickMany: false },
+                    );
+                    if (!clientSelection) {
+                        return;
+                    }
 
-                switch (clientSelection.label) {
-                    case Client.Ble:
-                        initClient(BleClient);
-                        break;
-
-                    case Client.Usb:
-                        initClient(UsbClient);
-                        break;
-
-                    default:
-                        throw new Error("Unsupported client");
+                    clientType = clientSelection.label as Client;
+                    initializeClient(clientType);
+                    selection = await showHubQuickPick(getClient()!);
                 }
-
-                const selection = await vscode.window.showQuickPick(
-                    getClient()!.list(),
-                    { canPickMany: false },
-                );
 
                 if (!selection) {
                     return;
@@ -86,7 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
                         location: vscode.ProgressLocation.Notification,
                         title: "Connecting to Hub...",
                     },
-                    () => getClient()!.connect(selection.description!),
+                    () => getClient()!.connect(selection.connectionId),
                 );
 
                 await onHubConnected();
@@ -109,6 +125,9 @@ export function activate(context: vscode.ExtensionContext) {
                     "Connecting to Hub Failed!" +
                         (e instanceof Error ? ` ${e.message}` : ""),
                 );
+            }
+            finally {
+                connectionAttemptInProgress = false;
             }
         },
     );
@@ -178,6 +197,108 @@ export function activate(context: vscode.ExtensionContext) {
             { webviewOptions: { retainContextWhenHidden: true } },
         ),
     );
+}
+
+function initializeClient(clientType: Client): void {
+    switch (clientType) {
+        case Client.Ble:
+            initClient(BleClient);
+            break;
+
+        case Client.Usb:
+            initClient(UsbClient);
+            break;
+
+        default:
+            throw new Error("Unsupported client");
+    }
+}
+
+async function showCombinedHubQuickPick(): Promise<CombinedHubQuickPickItem | undefined> {
+    const input = vscode.window.createQuickPick<CombinedHubQuickPickItem>();
+    const cancellation = new vscode.CancellationTokenSource();
+    const items = new Map<string, CombinedHubQuickPickItem>();
+    input.placeholder = "Searching for Bluetooth and USB hubs...";
+    input.busy = true;
+
+    const publishItems = () => {
+        input.items = [...items.values()];
+        input.busy = items.size === 0;
+    };
+    const updateItems = (clientType: Client, discoveredItems: readonly HubQuickPickItem[]) => {
+        for (const item of discoveredItems) {
+            items.set(`${clientType}:${item.connectionId}`, {
+                ...item,
+                description: item.description
+                    ? `${clientType} · ${item.description}`
+                    : clientType,
+                clientType,
+            });
+        }
+        publishItems();
+    };
+    const selectionPromise = new Promise<CombinedHubQuickPickItem | undefined>((resolve) => {
+        input.onDidAccept(() => {
+            resolve(input.selectedItems[0]);
+            input.hide();
+        });
+        input.onDidHide(() => resolve(undefined));
+    });
+    const clients: Array<{ type: Client, client: BaseClient }> = [
+        { type: Client.Ble, client: new BleClient(getLogger()) },
+        { type: Client.Usb, client: new UsbClient(getLogger()) },
+    ];
+    const listPromises = clients.map(({ type, client }) => client
+        .list(discoveredItems => updateItems(type, discoveredItems), cancellation.token)
+        .then(finalItems => updateItems(type, finalItems))
+        .catch((error) => {
+            getLogger().error(`Unable to search for ${type} hubs: ${error}`);
+        }));
+
+    input.show();
+    try {
+        return await selectionPromise;
+    }
+    finally {
+        cancellation.cancel();
+        await Promise.allSettled(listPromises);
+        cancellation.dispose();
+        input.dispose();
+    }
+}
+
+async function showHubQuickPick(client: BaseClient): Promise<HubQuickPickItem | undefined> {
+    const input = vscode.window.createQuickPick<HubQuickPickItem>();
+    const cancellation = new vscode.CancellationTokenSource();
+    input.placeholder = "Searching for hubs...";
+    input.busy = true;
+
+    const selectionPromise = new Promise<HubQuickPickItem | undefined>((resolve) => {
+        input.onDidAccept(() => {
+            resolve(input.selectedItems[0]);
+            input.hide();
+        });
+        input.onDidHide(() => resolve(undefined));
+    });
+    const updateItems = (items: readonly HubQuickPickItem[]) => {
+        input.items = items;
+        input.busy = items.length === 0;
+    };
+    const listPromise = client.list(updateItems, cancellation.token).then(updateItems);
+
+    input.show();
+    try {
+        return await Promise.race([
+            selectionPromise,
+            listPromise.then(() => selectionPromise),
+        ]);
+    }
+    finally {
+        cancellation.cancel();
+        await listPromise;
+        cancellation.dispose();
+        input.dispose();
+    }
 }
 
 // this method is called when your extension is deactivated
