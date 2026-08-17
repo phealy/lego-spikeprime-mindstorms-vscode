@@ -17,6 +17,15 @@ export function setTimeoutAsync(callback: () => void, delay: number) {
     });
 }
 
+export function formatBluetoothAddress(address: string): string {
+    const hexAddress = address.replace(/[^0-9a-f]/gi, "");
+    if (hexAddress.length !== 12) {
+        return address.toUpperCase();
+    }
+
+    return hexAddress.match(/.{2}/g)!.join(":").toUpperCase();
+}
+
 export function crc32WithAlignment(data: Uint8Array, seed = 0): number {
     const remainder = data.length % CRC32_ALIGNMENT;
     const alignedData = new Uint8Array(data.length + (CRC32_ALIGNMENT - remainder) % CRC32_ALIGNMENT);

@@ -8,6 +8,7 @@ import * as shellQuote from "shell-quote";
 import { v7 } from "uuid";
 import * as vscode from "vscode";
 
+import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
 import {
@@ -72,10 +73,7 @@ export function activate(context: vscode.ExtensionContext) {
                         throw new Error("Unsupported client");
                 }
 
-                const selection = await vscode.window.showQuickPick(
-                    getClient()!.list(),
-                    { canPickMany: false },
-                );
+                const selection = await showHubQuickPick(getClient()!);
 
                 if (!selection) {
                     return;
@@ -86,7 +84,7 @@ export function activate(context: vscode.ExtensionContext) {
                         location: vscode.ProgressLocation.Notification,
                         title: "Connecting to Hub...",
                     },
-                    () => getClient()!.connect(selection.description!),
+                    () => getClient()!.connect(selection.connectionId),
                 );
 
                 await onHubConnected();
@@ -178,6 +176,40 @@ export function activate(context: vscode.ExtensionContext) {
             { webviewOptions: { retainContextWhenHidden: true } },
         ),
     );
+}
+
+async function showHubQuickPick(client: BaseClient): Promise<HubQuickPickItem | undefined> {
+    const input = vscode.window.createQuickPick<HubQuickPickItem>();
+    const cancellation = new vscode.CancellationTokenSource();
+    input.placeholder = "Searching for hubs...";
+    input.busy = true;
+
+    const selectionPromise = new Promise<HubQuickPickItem | undefined>((resolve) => {
+        input.onDidAccept(() => {
+            resolve(input.selectedItems[0]);
+            input.hide();
+        });
+        input.onDidHide(() => resolve(undefined));
+    });
+    const updateItems = (items: readonly HubQuickPickItem[]) => {
+        input.items = items;
+        input.busy = items.length === 0;
+    };
+    const listPromise = client.list(updateItems, cancellation.token).then(updateItems);
+
+    input.show();
+    try {
+        return await Promise.race([
+            selectionPromise,
+            listPromise.then(() => selectionPromise),
+        ]);
+    }
+    finally {
+        cancellation.cancel();
+        await listPromise;
+        cancellation.dispose();
+        input.dispose();
+    }
 }
 
 // this method is called when your extension is deactivated

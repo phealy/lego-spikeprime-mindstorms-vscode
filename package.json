@@ -31,11 +31,6 @@
             "default": false,
             "description": "Saves the result after importing files into current script."
           },
-          "legoSpikePrimeMindstorms.bleConnectionTimeoutSeconds": {
-            "type": "number",
-            "default": 5,
-            "description": "Timeout in seconds for which to scan for Bluetooth devices and then connect to the selected one."
-          },
           "legoSpikePrimeMindstorms.customPrepocessorPath": {
             "type": "string",
             "default": "",
