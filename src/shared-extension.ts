@@ -10,6 +10,7 @@ let terminal: vscode.Terminal | null;
 let hubStatusBarItem: vscode.StatusBarItem;
 let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
+let showCurrentProgramProgress = true;
 let client: BaseClient | undefined;
 
 export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
@@ -27,17 +28,21 @@ export function configureRawMessageLogging(context: vscode.ExtensionContext): vo
 }
 
 export function initClient<U extends BaseClient>(clientClass: new (logger: Logger) => U): void {
-    client = new clientClass(logger);
+    const initializedClient = new clientClass(logger);
+    client = initializedClient;
 
-    client?.onClosed.event(() => {
+    initializedClient.onClosed.event(() => {
         void updateHubStatusBarItem();
         currentStartedProgramSlotId = undefined;
         currentStartedProgramResolve = undefined;
-        client = undefined;
+        showCurrentProgramProgress = true;
+        if (client === initializedClient) {
+            client = undefined;
+        }
     });
 
-    client?.onProgramRunningChanged.event((isRunningIn) => {
-        if (isRunningIn && currentStartedProgramSlotId !== undefined) {
+    initializedClient.onProgramRunningChanged.event((isRunningIn) => {
+        if (isRunningIn && currentStartedProgramSlotId !== undefined && showCurrentProgramProgress) {
             void vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
@@ -57,6 +62,9 @@ export function initClient<U extends BaseClient>(clientClass: new (logger: Logge
         if (!isRunningIn && currentStartedProgramResolve) {
             currentStartedProgramResolve();
             currentStartedProgramResolve = undefined;
+        }
+        if (!isRunningIn) {
+            showCurrentProgramProgress = true;
         }
     });
 }
@@ -317,20 +325,25 @@ export async function uploadProgramToHub(
     }
 }
 
-export async function startProgramInSlot(slotId: number) {
+export async function startProgramInSlot(slotId: number, showProgress = true) {
     if (isNaN(slotId)) {
         return;
     }
 
-    const success = await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: `Starting Program in Slot #${slotId}...`,
-        },
-        () => client!.startStopProgram(slotId),
-    );
+    const startProgram = () => client!.startStopProgram(slotId);
+    showCurrentProgramProgress = showProgress;
+    const success = showProgress
+        ? await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Starting Program in Slot #${slotId}...`,
+            },
+            startProgram,
+        )
+        : await startProgram();
 
     if (!success) {
+        showCurrentProgramProgress = true;
         vscode.window.showErrorMessage("Starting program not acknowledged from hub!");
         return;
     }

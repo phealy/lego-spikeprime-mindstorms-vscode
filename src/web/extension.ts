@@ -15,7 +15,7 @@ import {
     startProgramInSlot,
     uploadProgramToHub,
 } from "../shared-extension";
-import { Command } from "../utils";
+import { Command, setTimeoutAsync } from "../utils";
 import { WebUsbClient } from "./clients/web-usb-client";
 
 let wasmUri: vscode.Uri;
@@ -63,17 +63,21 @@ export async function activate(context: vscode.ExtensionContext) {
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
+                    title: programInfo.isAutostartIn
+                        ? "Uploading and running program..."
+                        : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
                 },
-                (progress) => performUploadProgram(programInfo.slotId, progress),
+                async (progress) => {
+                    await performUploadProgram(programInfo.slotId, progress);
+                    if (programInfo.isAutostartIn) {
+                        await setTimeoutAsync(() => { /* noop */ }, 250);
+                        await startProgramInSlot(programInfo.slotId, false);
+                    }
+                },
             );
 
-            vscode.window.showInformationMessage("Program uploaded!");
-
-            if (programInfo.isAutostartIn) {
-                setTimeout(() => {
-                    void startProgramInSlot(programInfo.slotId);
-                }, 250);
+            if (!programInfo.isAutostartIn) {
+                vscode.window.showInformationMessage("Program uploaded!");
             }
         }
         catch (e) {

@@ -24,7 +24,7 @@ import {
     startProgramInSlot,
     uploadProgramToHub,
 } from "./shared-extension";
-import { Command } from "./utils";
+import { Command, setTimeoutAsync } from "./utils";
 import { LiveDataViewProvider } from "./views/live-telemetry-provider";
 
 let mpyWasm: Uint8Array | undefined;
@@ -151,18 +151,21 @@ export function activate(context: vscode.ExtensionContext) {
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
-                        title: `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
+                        title: programInfo.isAutostartIn
+                            ? "Uploading and running program..."
+                            : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
                     },
-                    (progress) =>
-                        performUploadProgram(programInfo.slotId, progress),
+                    async (progress) => {
+                        await performUploadProgram(programInfo.slotId, progress);
+                        if (programInfo.isAutostartIn) {
+                            await setTimeoutAsync(() => { /* noop */ }, 250);
+                            await startProgramInSlot(programInfo.slotId, false);
+                        }
+                    },
                 );
 
-                vscode.window.showInformationMessage("Program uploaded!");
-
-                if (programInfo.isAutostartIn) {
-                    setTimeout(() => {
-                        void startProgramInSlot(programInfo.slotId);
-                    }, 250);
+                if (!programInfo.isAutostartIn) {
+                    vscode.window.showInformationMessage("Program uploaded!");
                 }
             }
             catch (e) {
@@ -542,9 +545,10 @@ function executeCustomPreprocessor(
         );
 
         child.stderr?.on("data", (data) => {
-            console.error(`Custom preprocessor error: ${data}`);
+            const message = `Custom preprocessor error: ${data.toString().trimEnd()}\n`;
+            console.error(message);
             vscode.window.showErrorMessage(
-                `Custom preprocessor error: ${data}`,
+                message,
             );
         });
         child.on("close", (code) => {
