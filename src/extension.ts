@@ -183,11 +183,15 @@ export function activate(context: vscode.ExtensionContext) {
             "lego-spikeprime-mindstorms-vscode.showLiveTelemetry",
             async () => {
                 await vscode.commands.executeCommand(
-                    "workbench.view.extension.legoRobotPanel",
+                    "workbench.view.extension.legoHubPanel",
                 );
 
                 await vscode.commands.executeCommand("legoLiveView.focus");
             },
+        ),
+        vscode.commands.registerCommand(
+            "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+            () => provider.showPanel(),
         ),
     );
 

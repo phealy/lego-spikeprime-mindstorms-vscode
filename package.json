@@ -104,6 +104,11 @@
         "command": "lego-spikeprime-mindstorms-vscode.showLiveTelemetry",
         "title": "LEGO Hub: Show Live Telemetry",
         "icon": "$(eye)"
+      },
+      {
+        "command": "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+        "title": "LEGO Hub: Open Live Telemetry in Editor",
+        "icon": "$(open-preview)"
       }
     ],
     "menus": {
@@ -133,14 +138,21 @@
           "group": "navigation@5",
           "when": "editorLangId == python"
         }
+      ],
+      "view/title": [
+        {
+          "command": "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+          "group": "navigation",
+          "when": "view == legoLiveView"
+        }
       ]
     },
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         {
           "id": "legoHubPanel",
           "title": "LEGO Hub",
-          "icon": "media/icon.svg"
+          "icon": "images/icon.png"
         }
       ]
     },

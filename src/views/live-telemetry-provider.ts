@@ -1,61 +1,104 @@
 import * as vscode from "vscode";
 
+import { BaseClient } from "../clients/base-client";
+import { getTelemetryDashboardHtml } from "./telemetry-dashboard-v2";
+
 export class LiveDataViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "legoLiveView";
 
     private _view?: vscode.WebviewView;
+    private readonly webviews = new Set<vscode.Webview>();
+    private panel?: vscode.WebviewPanel;
+    private telemetry?: any;
 
-    constructor(private readonly getClient: () => any | undefined) {}
+    constructor(private readonly getClient: () => BaseClient | undefined) {}
 
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
-
-        webviewView.webview.options = {
-            enableScripts: true,
-        };
-
-        webviewView.webview.html = this._getHtml();
-
-        webviewView.webview.onDidReceiveMessage(async (msg) => {
-            if (msg.type === "connect") {
-                vscode.commands.executeCommand(
-                    "lego-spikeprime-mindstorms-vscode.connectToHub",
-                );
-            }
-        });
+        this.registerWebview(webviewView.webview);
 
         webviewView.onDidChangeVisibility(() => {
             if (webviewView.visible) {
-                this._render();
+                this.render(webviewView.webview);
             }
         });
 
-        this._render();
+        webviewView.onDidDispose(() => {
+            this.webviews.delete(webviewView.webview);
+            if (this._view === webviewView) {
+                this._view = undefined;
+            }
+        });
+    }
+
+    public showPanel() {
+        if (this.panel) {
+            this.panel.reveal();
+            return;
+        }
+
+        const panel = vscode.window.createWebviewPanel(
+            "legoLiveTelemetryPanel",
+            "LEGO Hub Live Data",
+            vscode.ViewColumn.Beside,
+            { enableScripts: true, retainContextWhenHidden: true },
+        );
+        const webview = panel.webview;
+        this.panel = panel;
+        this.registerWebview(webview);
+        panel.onDidDispose(() => {
+            this.webviews.delete(webview);
+            if (this.panel === panel) {
+                this.panel = undefined;
+            }
+        });
     }
 
     public updateTelemetry(data: any) {
-        if (!this._view) return;
+        this.telemetry = data;
 
-        this._view.webview.postMessage({
-            type: "telemetry",
-            data,
-        });
+        for (const webview of this.webviews) {
+            webview.postMessage({ type: "telemetry", data });
+        }
     }
 
     public setClientStateChanged() {
-        this._render();
+        for (const webview of this.webviews) {
+            this.render(webview);
+        }
     }
 
-    private _render() {
+    private registerWebview(webview: vscode.Webview) {
+        this.webviews.add(webview);
+        webview.options = { enableScripts: true };
+        webview.html = getTelemetryDashboardHtml();
+        webview.onDidReceiveMessage((msg) => {
+            if (msg.type === "connect") {
+                void vscode.commands.executeCommand(
+                    "lego-spikeprime-mindstorms-vscode.connectToHub",
+                );
+            }
+            else if (msg.type === "ready") {
+                this.render(webview);
+            }
+        });
+        this.render(webview);
+    }
+
+    private render(webview: vscode.Webview) {
         const client = this.getClient();
 
-        this._view?.webview.postMessage({
+        webview.postMessage({
             type: "state",
-            connected: !!client,
+            connected: client?.isConnectedIn ?? false,
+            transport: client?.isConnectedIn ? client.transport : undefined,
         });
+        if (this.telemetry) {
+            webview.postMessage({ type: "telemetry", data: this.telemetry });
+        }
     }
 
-    private _getHtml() {
+    private _getLegacyHtml() {
         return `
         <!DOCTYPE html>
         <html lang="en">
