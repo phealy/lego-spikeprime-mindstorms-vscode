@@ -46,6 +46,10 @@ to the hub. This will receive the contents of the file as stdin. It should outpu
 > [!NOTE]  
 > This is not supported for web extension usage. 
 
+### Raw Message Logging
+
+For protocol debugging and test capture, enable `legoSpikePrimeMindstorms.logRawMessagesToFile` and reload the extension. The LEGO Hub terminal reports the generated `.jsonl` file in the extension log directory. Each line contains an ISO timestamp, direction (`in` or `out`), transport, and the complete COBS frame as hexadecimal data.
+
 ### Compilation
 
 The extension supports compiling Python files to binary (MPY) before uploading. This is controlled by a setting:

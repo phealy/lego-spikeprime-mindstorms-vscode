@@ -12,6 +12,20 @@ let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
 let client: BaseClient | undefined;
 
+export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
+    const enabled = vscode.workspace.getConfiguration(
+        "legoSpikePrimeMindstorms",
+    ).get<boolean>("logRawMessagesToFile", false);
+    if (!enabled) {
+        return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    logger.configureRawMessageLog(
+        vscode.Uri.joinPath(context.logUri, `raw-messages-${timestamp}.jsonl`),
+    );
+}
+
 export function initClient<U extends BaseClient>(clientClass: new (logger: Logger) => U): void {
     client = new clientClass(logger);
 
@@ -276,6 +290,7 @@ export async function onDeactivate() {
     if (client?.isConnectedIn) {
         await client.disconnect();
     }
+    await logger.flushRawMessageLog();
 }
 
 export async function uploadProgramToHub(
@@ -362,6 +377,9 @@ function showTerminal() {
                 onDidWrite: writeEmitter.event,
                 open: () => {
                     logger.info("Welcome to the LEGO Hub Log Terminal!\r\n");
+                    if (logger.rawMessageLogLocation) {
+                        logger.info(`Raw message logging enabled: ${logger.rawMessageLogLocation}\r\n`);
+                    }
                 },
                 close: () => { terminal = null; },
                 handleInput: (char: string) => {

@@ -201,6 +201,7 @@ export abstract class BaseClient {
         });
 
         // Split data in chunks based on maxPacketSize. If none, assume it is small enough to send in one go.
+        this._logger.rawMessage("out", this.transport, payload);
         const packetSize = this._infoResponse?.maxPacketSize ?? payload.length;
         for (let loop = 0; loop < payload.length; loop += packetSize) {
             await this.writeData(payload.slice(loop, loop + packetSize));
@@ -210,8 +211,10 @@ export abstract class BaseClient {
     }
 
     protected onData(data: Uint8Array) {
+        this._logger.rawMessage("in", this.transport, data);
+        let unpacked: Uint8Array | undefined;
         try {
-            const unpacked = unpack(data);
+            unpacked = unpack(data);
             const [messageId, resultMessage] = deserializeMessage(unpacked);
             const pendingMessage = this._pendingMessagesPromises.get(messageId);
             if (pendingMessage) {
@@ -232,7 +235,13 @@ export abstract class BaseClient {
             }
         }
         catch (e) {
-            this._logger.error(`Error deserializing message: ${e}`);
+            const frame = unpacked ?? data;
+            const hex = [...frame]
+                .map(byte => byte.toString(16).padStart(2, "0"))
+                .join(" ");
+            this._logger.error(
+                `Error deserializing message (${frame.length} bytes: ${hex}): ${e}`,
+            );
         }
     }
 

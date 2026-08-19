@@ -52,6 +52,11 @@
             "minimum": 20,
             "maximum": 2000,
             "description": "Interval (ms) for live device telemetry updates"
+          },
+          "legoSpikePrimeMindstorms.logRawMessagesToFile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Debug: log timestamped inbound and outbound raw hub messages to a JSONL file in the extension log directory. Requires reloading the extension after changing."
           }
         }
       }

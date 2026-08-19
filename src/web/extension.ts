@@ -3,6 +3,7 @@ import * as mpy from "@pybricks/mpy-cross-v6";
 import * as vscode from "vscode";
 
 import {
+    configureRawMessageLogging,
     getClient,
     getLogger,
     getProgramInfo,
@@ -23,6 +24,7 @@ export async function activate(context: vscode.ExtensionContext) {
     wasmUri = vscode.Uri.joinPath(context.extensionUri, "dist/mpy-cross-v6.wasm");
 
     initHubStatusBarItems(context);
+    configureRawMessageLogging(context);
 
     registerSharedCommands(context);
 

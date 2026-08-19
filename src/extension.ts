@@ -12,6 +12,7 @@ import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
 import {
+    configureRawMessageLogging,
     getClient,
     getLogger,
     getProgramInfo,
@@ -53,6 +54,7 @@ export function activate(context: vscode.ExtensionContext) {
     mpyWasm = fs.readFileSync(wasmFilePath);
 
     initHubStatusBarItems(context);
+    configureRawMessageLogging(context);
 
     registerSharedCommands(context);
 
