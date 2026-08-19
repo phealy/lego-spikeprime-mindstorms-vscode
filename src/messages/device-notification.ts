@@ -9,12 +9,33 @@ export class DeviceNotificationMessage extends BaseMessage {
     public deserialize(data: Uint8Array) {
         const view = new DataView(data.buffer);
 
+        if (data.length < 3) {
+            throw new Error(`Device notification header is truncated (${data.length} bytes)`);
+        }
+
         this.payloadSize = view.getUint16(1, true);
+        const payloadEnd = 3 + this.payloadSize;
+        if (payloadEnd > data.length) {
+            throw new Error(
+                `Device notification declares ${this.payloadSize} payload bytes, but only ${data.length - 3} are available`,
+            );
+        }
 
         let offset = 3;
 
-        while (offset < 3 + this.payloadSize!) {
+        while (offset < payloadEnd) {
             const type = view.getUint8(offset);
+            const recordSize = DEVICE_RECORD_SIZES.get(type);
+            if (recordSize === undefined) {
+                throw new Error(
+                    `Unknown device notification type 0x${type.toString(16).padStart(2, "0")} at offset ${offset}`,
+                );
+            }
+            if (offset + recordSize > payloadEnd) {
+                throw new Error(
+                    `Device notification type 0x${type.toString(16).padStart(2, "0")} at offset ${offset} requires ${recordSize} bytes, but only ${payloadEnd - offset} remain`,
+                );
+            }
 
             switch (type) {
                 case 0x00:
@@ -48,8 +69,6 @@ export class DeviceNotificationMessage extends BaseMessage {
                 case 0x0e:
                     offset = this.parse3x3Matrix(view, offset);
                     break;
-                default:
-                    return;
             }
         }
     }
@@ -152,20 +171,23 @@ export class DeviceNotificationMessage extends BaseMessage {
     private parseColorSensor(view: DataView, offset: number): number {
         const port = view.getUint8(offset + 1);
         const color = view.getInt8(offset + 2);
-        const red = view.getUint16(offset + 3, true);
-        const green = view.getUint16(offset + 5, true);
-        const blue = view.getUint16(offset + 7, true);
+        const reflected = view.getUint8(offset + 3);
+        const red = view.getUint16(offset + 4, true);
+        const green = view.getUint16(offset + 6, true);
+        const blue = view.getUint16(offset + 8, true);
 
         this.devices.push({
             type: "color",
             port,
             color,
+            colorName: COLOR_NAMES.get(color) ?? "unknown",
+            reflected,
             red,
             green,
             blue,
         });
 
-        return offset + 9;
+        return offset + 10;
     }
 
     private parseDistanceSensor(view: DataView, offset: number): number {
@@ -198,3 +220,29 @@ export class DeviceNotificationMessage extends BaseMessage {
         return offset + 11;
     }
 }
+
+const DEVICE_RECORD_SIZES = new Map<number, number>([
+    [0x00, 2],
+    [0x01, 21],
+    [0x02, 26],
+    [0x0a, 12],
+    [0x0b, 4],
+    [0x0c, 10],
+    [0x0d, 4],
+    [0x0e, 11],
+]);
+
+const COLOR_NAMES = new Map<number, string>([
+    [-1, "unknown"],
+    [0, "black"],
+    [1, "magenta"],
+    [2, "purple"],
+    [3, "blue"],
+    [4, "azure"],
+    [5, "turquoise"],
+    [6, "green"],
+    [7, "yellow"],
+    [8, "orange"],
+    [9, "red"],
+    [10, "white"],
+]);

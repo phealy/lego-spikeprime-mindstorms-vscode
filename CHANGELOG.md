@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix truncated Bluetooth console output and program progress notifications that remain open after a program stops immediately after starting.
+- Include the SPIKE color name with color sensor telemetry.
 
 ## 3.1.0 - 2025-06-22
 
