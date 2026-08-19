@@ -51,6 +51,24 @@ suite("Message Frame Decoder Test Suite", () => {
         ]);
     });
 
+    test("Resumes a low-priority frame after a high-priority frame", () => {
+        const decoder = new MessageFrameDecoder();
+
+        assert.deepStrictEqual(decoder.decode(Uint8Array.from([0x10, 0x11])), []);
+        assert.deepStrictEqual(decoder.decode(Uint8Array.from([
+            0x01,
+            0x20,
+            0x21,
+            0x02,
+            0x12,
+            0x13,
+            0x02,
+        ])), [
+            Uint8Array.from([0x01, 0x20, 0x21, 0x02]),
+            Uint8Array.from([0x10, 0x11, 0x12, 0x13, 0x02]),
+        ]);
+    });
+
     test("Reset discards an incomplete frame", () => {
         const decoder = new MessageFrameDecoder();
 
