@@ -15,6 +15,10 @@ export class UsbClient extends BaseClient {
         return this._serialPort?.isOpen ?? false;
     }
 
+    public get transport(): "usb" {
+        return "usb";
+    }
+
     public async list() {
         const ports = await SerialPort.list();
 

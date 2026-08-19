@@ -31,6 +31,11 @@
             "default": false,
             "description": "Saves the result after importing files into current script."
           },
+          "legoSpikePrimeMindstorms.connectToLastHubOnStartup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Attempt once to reconnect to the last connected hub using the previous connection method when the extension loads."
+          },
           "legoSpikePrimeMindstorms.automaticallySearchForBothBleAndUsbHubs": {
             "type": "boolean",
             "default": true,

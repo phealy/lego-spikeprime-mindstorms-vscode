@@ -18,6 +18,10 @@ export class WebUsbClient extends BaseClient {
         return this._port?.readable !== undefined && this._port?.writable !== undefined;
     }
 
+    public get transport(): "usb" {
+        return "usb";
+    }
+
     public list(
         _onDidChange: (items: readonly HubQuickPickItem[]) => void,
         _cancellationToken: vscode.CancellationToken,

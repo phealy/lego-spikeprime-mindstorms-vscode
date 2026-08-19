@@ -27,6 +27,7 @@ import { Command } from "./utils";
 import { LiveDataViewProvider } from "./views/live-telemetry-provider";
 
 let mpyWasm: Uint8Array | undefined;
+const LAST_CONNECTION_KEY = "lastHubConnection";
 const supportedClients: vscode.QuickPickItem[] = [
     { label: Client.Ble },
     { label: Client.Usb },
@@ -35,6 +36,11 @@ const supportedClients: vscode.QuickPickItem[] = [
 const enum Client {
     Ble = "Bluetooth",
     Usb = "USB",
+}
+
+interface StoredConnection {
+    client: Client;
+    connectionId: string;
 }
 
 interface CombinedHubQuickPickItem extends HubQuickPickItem {
@@ -105,19 +111,11 @@ export function activate(context: vscode.ExtensionContext) {
                     () => getClient()!.connect(selection.connectionId),
                 );
 
-                await onHubConnected();
-
-                getClient()!.onDeviceNotification.event((msg) => {
-                    provider.updateTelemetry(msg.devices);
-                });
-
-                getClient()!.onClosed.event(() => {
-                    provider.setClientStateChanged();
-                });
-
-                await getClient()!.startDeviceNotifications();
-
-                provider.setClientStateChanged();
+                await finishConnection(provider);
+                await context.globalState.update(LAST_CONNECTION_KEY, {
+                    client: clientType,
+                    connectionId: selection.connectionId,
+                } satisfies StoredConnection);
             }
             catch (e) {
                 console.error(e);
@@ -197,6 +195,19 @@ export function activate(context: vscode.ExtensionContext) {
             { webviewOptions: { retainContextWhenHidden: true } },
         ),
     );
+
+    if (vscode.workspace.getConfiguration().get<boolean>(
+        "legoSpikePrimeMindstorms.connectToLastHubOnStartup",
+        true,
+    )) {
+        const storedConnection = context.globalState.get<StoredConnection>(LAST_CONNECTION_KEY);
+        if (storedConnection) {
+            connectionAttemptInProgress = true;
+            void reconnectToLastHub(storedConnection, provider).finally(() => {
+                connectionAttemptInProgress = false;
+            });
+        }
+    }
 }
 
 function initializeClient(clientType: Client): void {
@@ -211,6 +222,43 @@ function initializeClient(clientType: Client): void {
 
         default:
             throw new Error("Unsupported client");
+    }
+}
+
+async function finishConnection(provider: LiveDataViewProvider): Promise<void> {
+    const connectedClient = getClient()!;
+    connectedClient.onDeviceNotification.event((msg) => {
+        provider.updateTelemetry(msg.devices);
+    });
+    connectedClient.onClosed.event(() => {
+        provider.setClientStateChanged();
+    });
+
+    await onHubConnected();
+    await connectedClient.startDeviceNotifications();
+    provider.setClientStateChanged();
+}
+
+async function reconnectToLastHub(
+    storedConnection: StoredConnection,
+    provider: LiveDataViewProvider,
+): Promise<void> {
+    try {
+        initializeClient(storedConnection.client);
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: "Reconnecting to LEGO Hub...",
+            },
+            () => getClient()!.reconnect(storedConnection.connectionId),
+        );
+        await finishConnection(provider);
+    }
+    catch (error) {
+        getLogger().error(
+            "Unable to reconnect to the last LEGO Hub: " +
+            (error instanceof Error ? error.message : error),
+        );
     }
 }
 

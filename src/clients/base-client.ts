@@ -32,6 +32,7 @@ export abstract class BaseClient {
     public onDeviceNotification: vscode.EventEmitter<DeviceNotificationMessage> =
         new vscode.EventEmitter<DeviceNotificationMessage>();
     public abstract get isConnectedIn(): boolean;
+    public abstract get transport(): "bluetooth" | "usb";
     public get firmwareVersion() {
         if (!this._infoResponse) {
             return undefined;
@@ -77,6 +78,10 @@ export abstract class BaseClient {
     ): Promise<HubQuickPickItem[]>;
 
     public abstract connect(peripheralUuid: string): Promise<void>;
+
+    public reconnect(peripheralUuid: string): Promise<void> {
+        return this.connect(peripheralUuid);
+    }
 
     public abstract disconnect(): Promise<void>;
 
