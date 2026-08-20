@@ -1,0 +1,91 @@
+name: Build GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to package and release (for example, 3.1.4 or 3.1.4-beta.1)
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release VSIX
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          if git rev-parse "refs/tags/v$RELEASE_VERSION" >/dev/null 2>&1; then
+            echo "Tag v$RELEASE_VERSION already exists." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set package version
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Compile tests
+        run: npm run test-compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: xvfb-run --auto-servernum node ./out/test/runTest.js
+
+      - name: Package VSIX
+        run: >-
+          npx --yes @vscode/vsce package --no-dependencies
+          --out "lego-spikeprime-mindstorms-vscode-$RELEASE_VERSION.vsix"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        shell: bash
+        run: |
+          prerelease_flag=()
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            prerelease_flag+=(--prerelease)
+          fi
+
+          gh release create "v$RELEASE_VERSION" \
+            "lego-spikeprime-mindstorms-vscode-$RELEASE_VERSION.vsix" \
+            --target "$GITHUB_SHA" \
+            --title "v$RELEASE_VERSION" \
+            --generate-notes \
+            "${prerelease_flag[@]}"
