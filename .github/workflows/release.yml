@@ -3,10 +3,6 @@ name: Build GitHub Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Version to package and release (for example, 3.1.4 or 3.1.4-beta.1)
-        required: true
-        type: string
       prerelease:
         description: Mark the GitHub release as a prerelease
         required: true
@@ -17,15 +13,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
     name: Build and release VSIX
     runs-on: ubuntu-latest
-    env:
-      RELEASE_VERSION: ${{ inputs.version }}
 
     steps:
       - name: Check out selected ref
@@ -38,6 +32,10 @@ jobs:
         with:
           node-version: 22.x
           cache: npm
+
+      - name: Read package version
+        shell: bash
+        run: node -p '"RELEASE_VERSION=" + require("./package.json").version' >> "$GITHUB_ENV"
 
       - name: Validate release version
         shell: bash
@@ -54,9 +52,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Set package version
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Compile tests
         run: npm run test-compile
