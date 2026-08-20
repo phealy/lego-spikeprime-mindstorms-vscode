@@ -6,7 +6,10 @@ import {
 
 import * as vscode from "vscode";
 
+import { pack, unpack } from "../cobs";
 import { MessageFrameDecoder } from "../message-frame-decoder";
+import { GetHubNameRequestMessage } from "../messages/get-hub-name-request-message";
+import { GetHubNameResponseMessage } from "../messages/get-hub-name-response-message";
 import { InfoRequestMessage } from "../messages/info-request-message";
 import { InfoResponseMessage } from "../messages/info-response-message";
 import { formatBluetoothAddress, setTimeoutAsync } from "../utils";
@@ -20,6 +23,7 @@ const SERVICE_UUID = "0000FD02-0000-1000-8000-00805F9B34FB";
 // Note RX/TX are from the point of the hub!
 const RX_CHAR_UUID = "0000FD02-0001-1000-8000-00805F9B34FB";
 const TX_CHAR_UUID = "0000FD02-0002-1000-8000-00805F9B34FB";
+const HUB_NAME_TIMEOUT_MS = 3000;
 const RECONNECT_DISCOVERY_TIMEOUT_MS = 10000;
 
 export class BleClient extends BaseClient {
@@ -43,6 +47,7 @@ export class BleClient extends BaseClient {
     ) {
         const items = new Map<string, HubQuickPickItem>();
         let isScanning = false;
+        let nameProbeQueue = Promise.resolve();
 
         const publishItems = () => onDidChange([...items.values()]);
         const onScanStart = () => { isScanning = true; };
@@ -67,13 +72,34 @@ export class BleClient extends BaseClient {
                     ? peripheral.address
                     : peripheral.id,
             );
-            const advertisedName = peripheral.advertisement.localName?.trim();
             const item: HubQuickPickItem = {
-                label: advertisedName ? `${advertisedName} (${address})` : address,
+                label: address,
                 connectionId: peripheral.id,
             };
             items.set(peripheral.id, item);
             publishItems();
+
+            nameProbeQueue = nameProbeQueue.then(async () => {
+                if (cancellationToken.isCancellationRequested) {
+                    return;
+                }
+
+                try {
+                    const name = await this.probeHubName(peripheral, cancellationToken);
+                    if (name) {
+                        item.label = `${name} (${address})`;
+                        publishItems();
+                    }
+                }
+                catch (error) {
+                    if (!cancellationToken.isCancellationRequested) {
+                        this._logger.error(`Unable to read hub name from ${address}: ${error}`);
+                    }
+                }
+                finally {
+                    await startScanning();
+                }
+            });
         };
 
         noble.on("scanStart", onScanStart);
@@ -96,6 +122,7 @@ export class BleClient extends BaseClient {
             noble.removeListener("scanStart", onScanStart);
             noble.removeListener("scanStop", onScanStop);
             await stopScanning();
+            await nameProbeQueue;
         }
 
         return [...items.values()];
@@ -188,4 +215,82 @@ export class BleClient extends BaseClient {
             this.onData(frame);
         }
     }
+
+    private async probeHubName(
+        peripheral: Peripheral,
+        cancellationToken: vscode.CancellationToken,
+    ): Promise<string | undefined> {
+        const decoder = new MessageFrameDecoder();
+        let notificationCharacteristic: Characteristic | undefined;
+        let timeout: NodeJS.Timeout | undefined;
+        let cancellationSubscription: vscode.Disposable | undefined;
+        let onData: ((data: Buffer) => void) | undefined;
+
+        try {
+            await peripheral.connectAsync();
+
+            const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
+                [SERVICE_UUID],
+                [RX_CHAR_UUID, TX_CHAR_UUID],
+            );
+            const writeCharacteristic = characteristics.find(
+                characteristic => normalizeUuid(characteristic.uuid) === normalizeUuid(RX_CHAR_UUID),
+            );
+            notificationCharacteristic = characteristics.find(
+                characteristic => normalizeUuid(characteristic.uuid) === normalizeUuid(TX_CHAR_UUID),
+            );
+
+            if (!writeCharacteristic || !notificationCharacteristic) {
+                throw new Error("Hub communication characteristics not found");
+            }
+
+            const responseCharacteristic = notificationCharacteristic;
+            await responseCharacteristic.subscribeAsync();
+            await setTimeoutAsync(() => { /* noop */ }, 250);
+
+            const responsePromise = new Promise<string | undefined>((resolve, reject) => {
+                onData = (data: Buffer) => {
+                    for (const frame of decoder.decode(data)) {
+                        const payload = unpack(frame);
+                        if (payload[0] === GetHubNameResponseMessage.Id) {
+                            const response = new GetHubNameResponseMessage();
+                            response.deserialize(payload);
+                            resolve(response.name);
+                        }
+                    }
+                };
+                responseCharacteristic.on("data", onData);
+                timeout = setTimeout(
+                    () => reject(new Error("Timed out waiting for hub name")),
+                    HUB_NAME_TIMEOUT_MS,
+                );
+                cancellationSubscription = cancellationToken.onCancellationRequested(
+                    () => reject(new Error("Hub name lookup cancelled")),
+                );
+            });
+
+            await writeCharacteristic.writeAsync(
+                Buffer.from(pack(new GetHubNameRequestMessage().serialize())),
+                true,
+            );
+            return await responsePromise;
+        }
+        finally {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+            cancellationSubscription?.dispose();
+            if (notificationCharacteristic && onData) {
+                notificationCharacteristic.removeListener("data", onData);
+            }
+            await notificationCharacteristic?.unsubscribeAsync().catch(() => { /* noop */ });
+            if (peripheral.state !== "disconnected") {
+                await peripheral.disconnectAsync().catch(() => { /* noop */ });
+            }
+        }
+    }
+}
+
+function normalizeUuid(uuid: string): string {
+    return uuid.replace(/-/g, "").toLowerCase();
 }
