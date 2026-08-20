@@ -83,9 +83,42 @@ jobs:
             prerelease_flag+=(--prerelease)
           fi
 
-          gh release create "v$RELEASE_VERSION" \
-            "lego-spikeprime-mindstorms-vscode-$RELEASE_VERSION.vsix" \
+          tag="v$RELEASE_VERSION"
+          asset="lego-spikeprime-mindstorms-vscode-$RELEASE_VERSION.vsix"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$asset"
+          generated_notes=$(gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$tag" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq .body)
+
+          printf '%s\n\n' "$generated_notes" > release-notes.md
+          cat >> release-notes.md <<'EOF'
+          ## Install
+
+          ### Windows (PowerShell)
+
+          ```powershell
+          EOF
+          printf '$URL = "%s"\n' "$url" >> release-notes.md
+          cat >> release-notes.md <<'EOF'
+          Invoke-WebRequest -Uri "$URL" -OutFile "$(Split-Path -Leaf $URL)"; code --install-extension "$(Split-Path -Leaf $URL)" --force; Remove-Item "$(Split-Path -Leaf $URL)"
+          ```
+
+          ### Linux/macOS
+
+          ```bash
+          EOF
+          printf 'URL="%s"\n' "$url" >> release-notes.md
+          cat >> release-notes.md <<'EOF'
+          curl --fail --location "$URL" --output "$(basename "$URL")"; code --install-extension "$(basename "$URL")" --force; rm "$(basename "$URL")"
+          ```
+          EOF
+
+          gh release create "$tag" \
+            "$asset" \
             --target "$GITHUB_SHA" \
-            --title "v$RELEASE_VERSION" \
-            --generate-notes \
+            --title "$tag" \
+            --notes-file release-notes.md \
             "${prerelease_flag[@]}"
