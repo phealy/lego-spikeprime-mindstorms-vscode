@@ -1,13 +1,12 @@
 
-import { fixupConfigRules, fixupPluginRules } from "@eslint/compat";
 import { FlatCompat } from "@eslint/eslintrc";
 import js from "@eslint/js";
-import stylisticTs from "@stylistic/eslint-plugin-ts";
+import stylistic from "@stylistic/eslint-plugin";
 import typescriptEslint from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 
 import { defineConfig, globalIgnores } from "eslint/config";
-import _import from "eslint-plugin-import";
+import { createTypeScriptImportResolver } from "eslint-import-resolver-typescript";
 import preferArrow from "eslint-plugin-prefer-arrow";
 import simpleImportSort from "eslint-plugin-simple-import-sort";
 import importNewLines from "eslint-plugin-import-newlines";
@@ -24,19 +23,16 @@ const compat = new FlatCompat({
 });
 
 export default defineConfig([globalIgnores(["**/*.d.ts"]), {
-    extends: fixupConfigRules(
-        compat.extends("eslint:recommended", "plugin:import/errors", "plugin:import/typescript"),
-    ),
+    extends: compat.extends("eslint:recommended", "plugin:import-x/errors", "plugin:import-x/typescript"),
 
     files: ["**/*.ts"],
 
     plugins: {
-        import: fixupPluginRules(_import),
         "prefer-arrow": preferArrow,
         "simple-import-sort": simpleImportSort,
         "import-newlines": importNewLines,
         "@typescript-eslint": typescriptEslint,
-        "@stylistic/ts": stylisticTs,
+        "@stylistic": stylistic,
     },
 
     languageOptions: {
@@ -50,7 +46,8 @@ export default defineConfig([globalIgnores(["**/*.d.ts"]), {
     },
 
     settings: {
-        "import/core-modules": ["vscode"],
+        "import-x/core-modules": ["vscode"],
+        "import-x/resolver-next": [createTypeScriptImportResolver()],
     },
 
     rules: {
@@ -68,7 +65,7 @@ export default defineConfig([globalIgnores(["**/*.d.ts"]), {
 
         "@typescript-eslint/dot-notation": "off",
 
-        "@stylistic/ts/indent": ["error", 4, {
+        "@stylistic/indent": ["error", 4, {
             SwitchCase: 1,
             ObjectExpression: "first",
 
@@ -81,7 +78,7 @@ export default defineConfig([globalIgnores(["**/*.d.ts"]), {
             },
         }],
 
-        "@stylistic/ts/member-delimiter-style": ["error", {
+        "@stylistic/member-delimiter-style": ["error", {
             multiline: {
                 delimiter: "comma",
                 requireLast: true,
@@ -135,7 +132,7 @@ export default defineConfig([globalIgnores(["**/*.d.ts"]), {
         "@typescript-eslint/prefer-for-of": "error",
         "@typescript-eslint/prefer-function-type": "error",
         "@typescript-eslint/prefer-namespace-keyword": "error",
-        "@stylistic/ts/semi": ["error"],
+        "@stylistic/semi": ["error"],
 
         "@typescript-eslint/triple-slash-reference": ["error", {
             path: "always",
@@ -171,7 +168,7 @@ export default defineConfig([globalIgnores(["**/*.d.ts"]), {
         ],
 
         "id-match": "error",
-        "import/no-extraneous-dependencies": "error",
+        "import-x/no-extraneous-dependencies": "error",
         "import-newlines/enforce": [
             "error",
             {
