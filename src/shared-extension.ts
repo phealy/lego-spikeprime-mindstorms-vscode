@@ -2,7 +2,11 @@ import * as vscode from "vscode";
 
 import { BaseClient } from "./clients/base-client";
 import { Logger } from "./logger";
-import { Command, crc32WithAlignment } from "./utils";
+import {
+    Command,
+    crc32WithAlignment,
+    hasLegoProgramHeader,
+} from "./utils";
 
 const writeEmitter = new vscode.EventEmitter<string>();
 const logger = new Logger(writeEmitter);
@@ -12,6 +16,7 @@ let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
 let showCurrentProgramProgress = true;
 let client: BaseClient | undefined;
+const LEGO_PROGRAM_HEADER_CONTEXT = "lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader";
 
 export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
     const enabled = vscode.workspace.getConfiguration(
@@ -78,6 +83,26 @@ export function getLogger(): Logger {
 }
 
 export function registerSharedCommands(context: vscode.ExtensionContext): void {
+    const updateLegoProgramHeaderContext = () => {
+        const document = vscode.window.activeTextEditor?.document;
+        const hasHeader = document?.languageId === "python"
+            && hasLegoProgramHeader(document.lineAt(0).text);
+        void vscode.commands.executeCommand(
+            "setContext",
+            LEGO_PROGRAM_HEADER_CONTEXT,
+            hasHeader,
+        );
+    };
+    const activeEditorListener = vscode.window.onDidChangeActiveTextEditor(
+        updateLegoProgramHeaderContext,
+    );
+    const documentListener = vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document === vscode.window.activeTextEditor?.document) {
+            updateLegoProgramHeaderContext();
+        }
+    });
+    updateLegoProgramHeaderContext();
+
     const disconnectFromHubCommand = vscode.commands.registerCommand(Command.DisconnectFromHub, async () => {
         if (!client?.isConnectedIn) {
             return;
@@ -209,6 +234,8 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
     });
 
     context.subscriptions.push(
+        activeEditorListener,
+        documentListener,
         disconnectFromHubCommand,
         setHubNameCommand,
         startProgramCommand,
@@ -254,7 +281,7 @@ export async function getProgramInfo(): Promise<{ slotId: number, isAutostartIn:
 
     // Header sample:
     // # LEGO slot:3
-    if (header?.startsWith("# LEGO")) {
+    if (hasLegoProgramHeader(header)) {
         const split = header.split(/[:\s]/gi);
         for (let loop = 0; loop < split.length; loop++) {
             const element = split[loop];

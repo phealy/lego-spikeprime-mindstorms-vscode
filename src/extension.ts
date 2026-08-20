@@ -11,6 +11,7 @@ import * as vscode from "vscode";
 import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
+import { registerHubOS3Stubs } from "./pylance-stubs";
 import {
     configureRawMessageLogging,
     getClient,
@@ -55,6 +56,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     initHubStatusBarItems(context);
     configureRawMessageLogging(context);
+    registerHubOS3Stubs(context);
 
     registerSharedCommands(context);
 

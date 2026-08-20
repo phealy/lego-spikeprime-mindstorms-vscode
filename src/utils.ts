@@ -27,6 +27,10 @@ export function formatBluetoothAddress(address: string): string {
     return hexAddress.match(/.{2}/g)!.join(":").toUpperCase();
 }
 
+export function hasLegoProgramHeader(firstLine: string): boolean {
+    return firstLine.startsWith("# LEGO");
+}
+
 export function crc32WithAlignment(data: Uint8Array, seed = 0): number {
     const remainder = data.length % CRC32_ALIGNMENT;
     const alignedData = new Uint8Array(data.length + (CRC32_ALIGNMENT - remainder) % CRC32_ALIGNMENT);

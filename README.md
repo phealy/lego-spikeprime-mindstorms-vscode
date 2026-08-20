@@ -55,6 +55,12 @@ For protocol debugging and test capture, enable `legoSpikePrimeMindstorms.logRaw
 The extension supports compiling Python files to binary (MPY) before uploading. This is controlled by a setting:
 ![compile-option](images/compile-option.png)
 
+### HubOS3 IntelliSense
+
+The extension installs Pylance and configures its bundled HubOS3 type stubs for Python autocomplete, signatures, hover information, and import checking. No Python package or virtual environment is required. Set `legoSpikePrimeMindstorms.enableHubOS3Stubs` to `false` to disable this integration.
+
+This feature requires the desktop extension host because Pylance cannot index extension files through a browser URI.
+
 ## Automatic upload/start of a python file
 
 During active development you will be uploading a program over and over again so going through all the prompts for type and slot is not very convenient. You can skip those prompts and automatically start the program after uploading by adding a specific comment line as first in your program.
@@ -72,6 +78,8 @@ For example, if I want the program to be uploaded to slot 5 and autostart it onc
 ## Credits
 
 Thanks to LEGO Group to publish [extensive docs](https://lego.github.io/spike-prime-docs/index.html) on how to work with the HubOS protocol.
+
+The bundled HubOS3 type stubs are adapted from [spike3-stubs](https://github.com/Pablomatisch/spike-prime-v3-stubs) by pablomatisch and cross-checked against [LEGO SPIKE Python v3 docs](https://github.com/jvolkening/lego-spike-python-v3-docs) by Jeremy Volkening. Both sources and the official LEGO Education API documentation are credited in [python-stubs/NOTICE.md](python-stubs/NOTICE.md).
 
 ## Disclaimer
 
