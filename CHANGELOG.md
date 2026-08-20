@@ -5,6 +5,12 @@
 - Fix truncated Bluetooth console output and program progress notifications that remain open after a program stops immediately after starting.
 - Update Bluetooth hub search results as hubs are discovered, and show each hub's name and formatted MAC address.
 - Add a command to change the connected hub's name.
+- Add an option to reconnect once to the last connected hub when the extension loads.
+- Include the SPIKE color name with color sensor telemetry.
+- Bundle HubOS3 Python type stubs and configure Pylance for autocomplete and type information without a separate Python package.
+- Include the HubOS `time.ticks_ms()` API in the bundled type stubs.
+- Add semantic types for all HubOS constant families, motor arguments, and asynchronous results, including built-in module overrides.
+- Use F5 to upload and Shift+F5 to stop connected LEGO programs while the active Python file has a `# LEGO` header.
 
 ## 3.1.0 - 2025-06-22
 

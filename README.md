@@ -46,10 +46,20 @@ to the hub. This will receive the contents of the file as stdin. It should outpu
 > [!NOTE]  
 > This is not supported for web extension usage. 
 
+### Raw Message Logging
+
+For protocol debugging and test capture, enable `legoSpikePrimeMindstorms.logRawMessagesToFile` and reload the extension. The LEGO Hub terminal reports the generated `.jsonl` file in the extension log directory. Each line contains an ISO timestamp, direction (`in` or `out`), transport, and the complete COBS frame as hexadecimal data.
+
 ### Compilation
 
 The extension supports compiling Python files to binary (MPY) before uploading. This is controlled by a setting:
 ![compile-option](images/compile-option.png)
+
+### HubOS3 IntelliSense
+
+The extension installs Pylance and configures its bundled HubOS3 type stubs for Python autocomplete, signatures, hover information, and import checking. No Python package or virtual environment is required. Set `legoSpikePrimeMindstorms.enableHubOS3Stubs` to `false` to disable this integration.
+
+This feature requires the desktop extension host because Pylance cannot index extension files through a browser URI.
 
 ## Automatic upload/start of a python file
 
@@ -68,6 +78,8 @@ For example, if I want the program to be uploaded to slot 5 and autostart it onc
 ## Credits
 
 Thanks to LEGO Group to publish [extensive docs](https://lego.github.io/spike-prime-docs/index.html) on how to work with the HubOS protocol.
+
+The bundled HubOS3 type stubs are adapted from [spike3-stubs](https://github.com/Pablomatisch/spike-prime-v3-stubs) by pablomatisch and cross-checked against [LEGO SPIKE Python v3 docs](https://github.com/jvolkening/lego-spike-python-v3-docs) by Jeremy Volkening. Both sources and the official LEGO Education API documentation are credited in [python-stubs/NOTICE.md](python-stubs/NOTICE.md).
 
 ## Disclaimer
 

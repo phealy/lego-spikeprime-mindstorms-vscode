@@ -11,7 +11,9 @@ import * as vscode from "vscode";
 import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
+import { registerHubOS3Stubs } from "./pylance-stubs";
 import {
+    configureRawMessageLogging,
     getClient,
     getLogger,
     getProgramInfo,
@@ -23,10 +25,11 @@ import {
     startProgramInSlot,
     uploadProgramToHub,
 } from "./shared-extension";
-import { Command } from "./utils";
+import { Command, setTimeoutAsync } from "./utils";
 import { LiveDataViewProvider } from "./views/live-telemetry-provider";
 
 let mpyWasm: Uint8Array | undefined;
+const LAST_CONNECTION_KEY = "lastHubConnection";
 const supportedClients: vscode.QuickPickItem[] = [
     { label: Client.Ble },
     { label: Client.Usb },
@@ -37,43 +40,68 @@ const enum Client {
     Usb = "USB",
 }
 
+interface StoredConnection {
+    client: Client;
+    connectionId: string;
+}
+
+interface CombinedHubQuickPickItem extends HubQuickPickItem {
+    clientType: Client;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     // HACK: This is a workaround for https://github.com/pybricks/support/issues/2185
     const wasmFilePath = path.join(__dirname, "mpy-cross-v6.wasm");
     mpyWasm = fs.readFileSync(wasmFilePath);
 
     initHubStatusBarItems(context);
+    configureRawMessageLogging(context);
+    registerHubOS3Stubs(context);
 
     registerSharedCommands(context);
 
     const provider = new LiveDataViewProvider(getClient);
+    let connectionAttemptInProgress = false;
 
     const connectToHubCommand = vscode.commands.registerCommand(
         Command.ConnectToHub,
         async () => {
+            if (connectionAttemptInProgress) {
+                return;
+            }
+
+            connectionAttemptInProgress = true;
             try {
-                const clientSelection = await vscode.window.showQuickPick(
-                    supportedClients,
-                    { canPickMany: false },
+                const searchBoth = vscode.workspace.getConfiguration().get<boolean>(
+                    "legoSpikePrimeMindstorms.automaticallySearchForBothBleAndUsbHubs",
+                    true,
                 );
-                if (!clientSelection) {
-                    return;
+                let clientType: Client;
+                let selection: HubQuickPickItem | undefined;
+
+                if (searchBoth) {
+                    const combinedSelection = await showCombinedHubQuickPick();
+                    if (!combinedSelection) {
+                        return;
+                    }
+
+                    clientType = combinedSelection.clientType;
+                    selection = combinedSelection;
+                    initializeClient(clientType);
                 }
+                else {
+                    const clientSelection = await vscode.window.showQuickPick(
+                        supportedClients,
+                        { canPickMany: false },
+                    );
+                    if (!clientSelection) {
+                        return;
+                    }
 
-                switch (clientSelection.label) {
-                    case Client.Ble:
-                        initClient(BleClient);
-                        break;
-
-                    case Client.Usb:
-                        initClient(UsbClient);
-                        break;
-
-                    default:
-                        throw new Error("Unsupported client");
+                    clientType = clientSelection.label as Client;
+                    initializeClient(clientType);
+                    selection = await showHubQuickPick(getClient()!);
                 }
-
-                const selection = await showHubQuickPick(getClient()!);
 
                 if (!selection) {
                     return;
@@ -87,19 +115,11 @@ export function activate(context: vscode.ExtensionContext) {
                     () => getClient()!.connect(selection.connectionId),
                 );
 
-                await onHubConnected();
-
-                getClient()!.onDeviceNotification.event((msg) => {
-                    provider.updateTelemetry(msg.devices);
-                });
-
-                getClient()!.onClosed.event(() => {
-                    provider.setClientStateChanged();
-                });
-
-                await getClient()!.startDeviceNotifications();
-
-                provider.setClientStateChanged();
+                await finishConnection(provider);
+                await context.globalState.update(LAST_CONNECTION_KEY, {
+                    client: clientType,
+                    connectionId: selection.connectionId,
+                } satisfies StoredConnection);
             }
             catch (e) {
                 console.error(e);
@@ -107,6 +127,9 @@ export function activate(context: vscode.ExtensionContext) {
                     "Connecting to Hub Failed!" +
                         (e instanceof Error ? ` ${e.message}` : ""),
                 );
+            }
+            finally {
+                connectionAttemptInProgress = false;
             }
         },
     );
@@ -130,18 +153,21 @@ export function activate(context: vscode.ExtensionContext) {
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
-                        title: `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
+                        title: programInfo.isAutostartIn
+                            ? "Uploading and running program..."
+                            : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
                     },
-                    (progress) =>
-                        performUploadProgram(programInfo.slotId, progress),
+                    async (progress) => {
+                        await performUploadProgram(programInfo.slotId, progress);
+                        if (programInfo.isAutostartIn) {
+                            await setTimeoutAsync(() => { /* noop */ }, 250);
+                            await startProgramInSlot(programInfo.slotId, false);
+                        }
+                    },
                 );
 
-                vscode.window.showInformationMessage("Program uploaded!");
-
-                if (programInfo.isAutostartIn) {
-                    setTimeout(() => {
-                        void startProgramInSlot(programInfo.slotId);
-                    }, 250);
+                if (!programInfo.isAutostartIn) {
+                    vscode.window.showInformationMessage("Program uploaded!");
                 }
             }
             catch (e) {
@@ -159,11 +185,15 @@ export function activate(context: vscode.ExtensionContext) {
             "lego-spikeprime-mindstorms-vscode.showLiveTelemetry",
             async () => {
                 await vscode.commands.executeCommand(
-                    "workbench.view.extension.legoRobotPanel",
+                    "workbench.view.extension.legoHubPanel",
                 );
 
                 await vscode.commands.executeCommand("legoLiveView.focus");
             },
+        ),
+        vscode.commands.registerCommand(
+            "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+            () => provider.showPanel(),
         ),
     );
 
@@ -176,6 +206,124 @@ export function activate(context: vscode.ExtensionContext) {
             { webviewOptions: { retainContextWhenHidden: true } },
         ),
     );
+
+    if (vscode.workspace.getConfiguration().get<boolean>(
+        "legoSpikePrimeMindstorms.connectToLastHubOnStartup",
+        true,
+    )) {
+        const storedConnection = context.globalState.get<StoredConnection>(LAST_CONNECTION_KEY);
+        if (storedConnection) {
+            connectionAttemptInProgress = true;
+            void reconnectToLastHub(storedConnection, provider).finally(() => {
+                connectionAttemptInProgress = false;
+            });
+        }
+    }
+}
+
+function initializeClient(clientType: Client): void {
+    switch (clientType) {
+        case Client.Ble:
+            initClient(BleClient);
+            break;
+
+        case Client.Usb:
+            initClient(UsbClient);
+            break;
+
+        default:
+            throw new Error("Unsupported client");
+    }
+}
+
+async function finishConnection(provider: LiveDataViewProvider): Promise<void> {
+    const connectedClient = getClient()!;
+    connectedClient.onDeviceNotification.event((msg) => {
+        provider.updateTelemetry(msg.devices);
+    });
+    connectedClient.onClosed.event(() => {
+        provider.setClientStateChanged();
+    });
+
+    await onHubConnected();
+    await connectedClient.startDeviceNotifications();
+    provider.setClientStateChanged();
+}
+
+async function reconnectToLastHub(
+    storedConnection: StoredConnection,
+    provider: LiveDataViewProvider,
+): Promise<void> {
+    try {
+        initializeClient(storedConnection.client);
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: "Reconnecting to LEGO Hub...",
+            },
+            () => getClient()!.reconnect(storedConnection.connectionId),
+        );
+        await finishConnection(provider);
+    }
+    catch (error) {
+        getLogger().error(
+            "Unable to reconnect to the last LEGO Hub: " +
+            (error instanceof Error ? error.message : error),
+        );
+    }
+}
+
+async function showCombinedHubQuickPick(): Promise<CombinedHubQuickPickItem | undefined> {
+    const input = vscode.window.createQuickPick<CombinedHubQuickPickItem>();
+    const cancellation = new vscode.CancellationTokenSource();
+    const items = new Map<string, CombinedHubQuickPickItem>();
+    input.placeholder = "Searching for Bluetooth and USB hubs...";
+    input.busy = true;
+
+    const publishItems = () => {
+        input.items = [...items.values()];
+        input.busy = items.size === 0;
+    };
+    const updateItems = (clientType: Client, discoveredItems: readonly HubQuickPickItem[]) => {
+        for (const item of discoveredItems) {
+            items.set(`${clientType}:${item.connectionId}`, {
+                ...item,
+                description: item.description
+                    ? `${clientType} · ${item.description}`
+                    : clientType,
+                clientType,
+            });
+        }
+        publishItems();
+    };
+    const selectionPromise = new Promise<CombinedHubQuickPickItem | undefined>((resolve) => {
+        input.onDidAccept(() => {
+            resolve(input.selectedItems[0]);
+            input.hide();
+        });
+        input.onDidHide(() => resolve(undefined));
+    });
+    const clients: Array<{ type: Client, client: BaseClient }> = [
+        { type: Client.Ble, client: new BleClient(getLogger()) },
+        { type: Client.Usb, client: new UsbClient(getLogger()) },
+    ];
+    const listPromises = clients.map(({ type, client }) => client
+        .list(discoveredItems => updateItems(type, discoveredItems), cancellation.token)
+        .then(finalItems => updateItems(type, finalItems))
+        .catch((error) => {
+            getLogger().error(`Unable to search for ${type} hubs: ${error}`);
+        }));
+
+    input.show();
+    try {
+        return await selectionPromise;
+    }
+    finally {
+        cancellation.cancel();
+        await Promise.allSettled(listPromises);
+        cancellation.dispose();
+        input.dispose();
+    }
 }
 
 async function showHubQuickPick(client: BaseClient): Promise<HubQuickPickItem | undefined> {
@@ -403,9 +551,10 @@ function executeCustomPreprocessor(
         );
 
         child.stderr?.on("data", (data) => {
-            console.error(`Custom preprocessor error: ${data}`);
+            const message = `Custom preprocessor error: ${data.toString().trimEnd()}\n`;
+            console.error(message);
             vscode.window.showErrorMessage(
-                `Custom preprocessor error: ${data}`,
+                message,
             );
         });
         child.on("close", (code) => {

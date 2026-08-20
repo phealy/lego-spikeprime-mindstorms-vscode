@@ -24,16 +24,22 @@ const SERVICE_UUID = "0000FD02-0000-1000-8000-00805F9B34FB";
 const RX_CHAR_UUID = "0000FD02-0001-1000-8000-00805F9B34FB";
 const TX_CHAR_UUID = "0000FD02-0002-1000-8000-00805F9B34FB";
 const HUB_NAME_TIMEOUT_MS = 3000;
+const RECONNECT_DISCOVERY_TIMEOUT_MS = 10000;
 
 export class BleClient extends BaseClient {
     public get isConnectedIn(): boolean {
         return !!this._peripheral;
     }
 
+    public get transport(): "bluetooth" {
+        return "bluetooth";
+    }
+
     private _peripheral: Peripheral | undefined;
     private _rxCharacteristic: Characteristic | undefined;
     private _txCharacteristic: Characteristic | undefined;
     private readonly _messageFrameDecoder = new MessageFrameDecoder();
+    private readonly _onPeripheralDisconnect = this.onDisconnect.bind(this);
 
     public async list(
         onDidChange: (items: readonly HubQuickPickItem[]) => void,
@@ -125,7 +131,7 @@ export class BleClient extends BaseClient {
     public async connect(peripheralUuid: string) {
         this._messageFrameDecoder.reset();
         this._peripheral = await noble.connectAsync(peripheralUuid);
-        this._peripheral.on("disconnect", this.onDisconnect.bind(this));
+        this._peripheral.on("disconnect", this._onPeripheralDisconnect);
 
         const { characteristics } = await this._peripheral.discoverSomeServicesAndCharacteristicsAsync(
             [SERVICE_UUID],
@@ -147,6 +153,40 @@ export class BleClient extends BaseClient {
         this._infoResponse = await this.sendMessage<InfoRequestMessage, InfoResponseMessage>(new InfoRequestMessage(), InfoResponseMessage);
     }
 
+    public async reconnect(peripheralUuid: string): Promise<void> {
+        await noble.waitForPoweredOnAsync();
+
+        let timeout: NodeJS.Timeout | undefined;
+        let onDiscover: ((peripheral: Peripheral) => void) | undefined;
+        let peripheral: Peripheral;
+        try {
+            peripheral = await new Promise<Peripheral>((resolve, reject) => {
+                onDiscover = (discoveredPeripheral: Peripheral) => {
+                    if (discoveredPeripheral.id === peripheralUuid) {
+                        resolve(discoveredPeripheral);
+                    }
+                };
+                noble.on("discover", onDiscover);
+                timeout = setTimeout(
+                    () => reject(new Error("Last connected hub was not found")),
+                    RECONNECT_DISCOVERY_TIMEOUT_MS,
+                );
+                void noble.startScanningAsync([SERVICE_UUID]).catch(reject);
+            });
+        }
+        finally {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+            if (onDiscover) {
+                noble.removeListener("discover", onDiscover);
+            }
+            await noble.stopScanningAsync().catch(() => { /* noop */ });
+        }
+
+        await this.connect(peripheral.id);
+    }
+
     public async disconnect() {
         if (this._peripheral) {
             await this._peripheral.disconnectAsync();
@@ -159,6 +199,7 @@ export class BleClient extends BaseClient {
 
     protected onDisconnect() {
         this._messageFrameDecoder.reset();
+        this._peripheral?.removeListener("disconnect", this._onPeripheralDisconnect);
         this._rxCharacteristic?.unsubscribe();
         this._rxCharacteristic?.removeAllListeners("data");
 

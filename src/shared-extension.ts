@@ -2,7 +2,11 @@ import * as vscode from "vscode";
 
 import { BaseClient } from "./clients/base-client";
 import { Logger } from "./logger";
-import { Command, crc32WithAlignment } from "./utils";
+import {
+    Command,
+    crc32WithAlignment,
+    hasLegoProgramHeader,
+} from "./utils";
 
 const writeEmitter = new vscode.EventEmitter<string>();
 const logger = new Logger(writeEmitter);
@@ -10,20 +14,40 @@ let terminal: vscode.Terminal | null;
 let hubStatusBarItem: vscode.StatusBarItem;
 let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
+let showCurrentProgramProgress = true;
 let client: BaseClient | undefined;
+const LEGO_PROGRAM_HEADER_CONTEXT = "lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader";
+
+export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
+    const enabled = vscode.workspace.getConfiguration(
+        "legoSpikePrimeMindstorms",
+    ).get<boolean>("logRawMessagesToFile", false);
+    if (!enabled) {
+        return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    logger.configureRawMessageLog(
+        vscode.Uri.joinPath(context.logUri, `raw-messages-${timestamp}.jsonl`),
+    );
+}
 
 export function initClient<U extends BaseClient>(clientClass: new (logger: Logger) => U): void {
-    client = new clientClass(logger);
+    const initializedClient = new clientClass(logger);
+    client = initializedClient;
 
-    client?.onClosed.event(() => {
+    initializedClient.onClosed.event(() => {
         void updateHubStatusBarItem();
         currentStartedProgramSlotId = undefined;
         currentStartedProgramResolve = undefined;
-        client = undefined;
+        showCurrentProgramProgress = true;
+        if (client === initializedClient) {
+            client = undefined;
+        }
     });
 
-    client?.onProgramRunningChanged.event((isRunningIn) => {
-        if (isRunningIn && currentStartedProgramSlotId !== undefined) {
+    initializedClient.onProgramRunningChanged.event((isRunningIn) => {
+        if (isRunningIn && currentStartedProgramSlotId !== undefined && showCurrentProgramProgress) {
             void vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
@@ -44,6 +68,9 @@ export function initClient<U extends BaseClient>(clientClass: new (logger: Logge
             currentStartedProgramResolve();
             currentStartedProgramResolve = undefined;
         }
+        if (!isRunningIn) {
+            showCurrentProgramProgress = true;
+        }
     });
 }
 
@@ -56,6 +83,26 @@ export function getLogger(): Logger {
 }
 
 export function registerSharedCommands(context: vscode.ExtensionContext): void {
+    const updateLegoProgramHeaderContext = () => {
+        const document = vscode.window.activeTextEditor?.document;
+        const hasHeader = document?.languageId === "python"
+            && hasLegoProgramHeader(document.lineAt(0).text);
+        void vscode.commands.executeCommand(
+            "setContext",
+            LEGO_PROGRAM_HEADER_CONTEXT,
+            hasHeader,
+        );
+    };
+    const activeEditorListener = vscode.window.onDidChangeActiveTextEditor(
+        updateLegoProgramHeaderContext,
+    );
+    const documentListener = vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document === vscode.window.activeTextEditor?.document) {
+            updateLegoProgramHeaderContext();
+        }
+    });
+    updateLegoProgramHeaderContext();
+
     const disconnectFromHubCommand = vscode.commands.registerCommand(Command.DisconnectFromHub, async () => {
         if (!client?.isConnectedIn) {
             return;
@@ -187,6 +234,8 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
     });
 
     context.subscriptions.push(
+        activeEditorListener,
+        documentListener,
         disconnectFromHubCommand,
         setHubNameCommand,
         startProgramCommand,
@@ -232,7 +281,7 @@ export async function getProgramInfo(): Promise<{ slotId: number, isAutostartIn:
 
     // Header sample:
     // # LEGO slot:3
-    if (header?.startsWith("# LEGO")) {
+    if (hasLegoProgramHeader(header)) {
         const split = header.split(/[:\s]/gi);
         for (let loop = 0; loop < split.length; loop++) {
             const element = split[loop];
@@ -276,6 +325,7 @@ export async function onDeactivate() {
     if (client?.isConnectedIn) {
         await client.disconnect();
     }
+    await logger.flushRawMessageLog();
 }
 
 export async function uploadProgramToHub(
@@ -302,20 +352,25 @@ export async function uploadProgramToHub(
     }
 }
 
-export async function startProgramInSlot(slotId: number) {
+export async function startProgramInSlot(slotId: number, showProgress = true) {
     if (isNaN(slotId)) {
         return;
     }
 
-    const success = await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: `Starting Program in Slot #${slotId}...`,
-        },
-        () => client!.startStopProgram(slotId),
-    );
+    const startProgram = () => client!.startStopProgram(slotId);
+    showCurrentProgramProgress = showProgress;
+    const success = showProgress
+        ? await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Starting Program in Slot #${slotId}...`,
+            },
+            startProgram,
+        )
+        : await startProgram();
 
     if (!success) {
+        showCurrentProgramProgress = true;
         vscode.window.showErrorMessage("Starting program not acknowledged from hub!");
         return;
     }
@@ -362,6 +417,9 @@ function showTerminal() {
                 onDidWrite: writeEmitter.event,
                 open: () => {
                     logger.info("Welcome to the LEGO Hub Log Terminal!\r\n");
+                    if (logger.rawMessageLogLocation) {
+                        logger.info(`Raw message logging enabled: ${logger.rawMessageLogLocation}\r\n`);
+                    }
                 },
                 close: () => { terminal = null; },
                 handleInput: (char: string) => {

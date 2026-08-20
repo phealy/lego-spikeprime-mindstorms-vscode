@@ -7,6 +7,9 @@
   "engines": {
     "vscode": "^1.66.0"
   },
+  "extensionDependencies": [
+    "ms-python.vscode-pylance"
+  ],
   "categories": [
     "Other"
   ],
@@ -31,6 +34,16 @@
             "default": false,
             "description": "Saves the result after importing files into current script."
           },
+          "legoSpikePrimeMindstorms.connectToLastHubOnStartup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Attempt once to reconnect to the last connected hub using the previous connection method when the extension loads."
+          },
+          "legoSpikePrimeMindstorms.automaticallySearchForBothBleAndUsbHubs": {
+            "type": "boolean",
+            "default": true,
+            "description": "Search for Bluetooth and USB hubs together instead of prompting for a connection type first."
+          },
           "legoSpikePrimeMindstorms.customPrepocessorPath": {
             "type": "string",
             "default": "",
@@ -42,6 +55,16 @@
             "minimum": 20,
             "maximum": 2000,
             "description": "Interval (ms) for live device telemetry updates"
+          },
+          "legoSpikePrimeMindstorms.logRawMessagesToFile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Debug: log timestamped inbound and outbound raw hub messages to a JSONL file in the extension log directory. Requires reloading the extension after changing."
+          },
+          "legoSpikePrimeMindstorms.enableHubOS3Stubs": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable bundled HubOS3 API completions and type information in Python files using Pylance."
           }
         }
       }
@@ -89,6 +112,23 @@
         "command": "lego-spikeprime-mindstorms-vscode.showLiveTelemetry",
         "title": "LEGO Hub: Show Live Telemetry",
         "icon": "$(eye)"
+      },
+      {
+        "command": "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+        "title": "LEGO Hub: Open Live Telemetry in Editor",
+        "icon": "$(open-preview)"
+      }
+    ],
+    "keybindings": [
+      {
+        "key": "f5",
+        "command": "lego-spikeprime-mindstorms-vscode.uploadProgram",
+        "when": "lego-spikeprime-mindstorms-vscode.isConnectedIn && lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader && editorLangId == python"
+      },
+      {
+        "key": "shift+f5",
+        "command": "lego-spikeprime-mindstorms-vscode.terminateProgram",
+        "when": "lego-spikeprime-mindstorms-vscode.isConnectedIn && lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader && editorLangId == python"
       }
     ],
     "menus": {
@@ -118,14 +158,21 @@
           "group": "navigation@5",
           "when": "editorLangId == python"
         }
+      ],
+      "view/title": [
+        {
+          "command": "lego-spikeprime-mindstorms-vscode.openLiveTelemetryPanel",
+          "group": "navigation",
+          "when": "view == legoLiveView"
+        }
       ]
     },
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         {
           "id": "legoHubPanel",
           "title": "LEGO Hub",
-          "icon": "media/icon.svg"
+          "icon": "images/icon.png"
         }
       ]
     },
