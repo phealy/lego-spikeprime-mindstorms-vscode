@@ -26,6 +26,11 @@ export interface HubQuickPickItem extends vscode.QuickPickItem {
     connectionId: string;
 }
 
+interface PendingMessage {
+    resolve: (result: BaseMessage) => void;
+    reject: (error: Error) => void;
+}
+
 export abstract class BaseClient {
     public onClosed: vscode.EventEmitter<void> =
         new vscode.EventEmitter<void>();
@@ -63,17 +68,16 @@ export abstract class BaseClient {
     }
 
     protected _logger: Logger;
-    protected _pendingMessagesPromises = new Map<
-        number,
-        [
-            (result: BaseMessage | PromiseLike<BaseMessage>) => void,
-            (e: string) => void,
-        ]
-    >();
+    protected _pendingMessagesPromises = new Map<number, PendingMessage>();
     protected _infoResponse: InfoResponseMessage | undefined;
     protected _hubName: string | undefined;
     protected _macAddress: string | undefined;
     private _isConnectionLogged = false;
+    private _requestTimedOut = false;
+
+    protected get requestTimeoutMs() {
+        return 10000;
+    }
 
     constructor(logger: Logger) {
         this._logger = logger;
@@ -221,32 +225,119 @@ export abstract class BaseClient {
         message: T,
         result: typeof BaseMessage,
     ): Promise<U> {
-        const payload = pack(message.serialize());
-        const resultPromise = new Promise<BaseMessage>((resolve, reject) => {
-            this._pendingMessagesPromises.set(result.Id, [resolve, reject]);
-        });
-
-        // Split data in chunks based on maxPacketSize. If none, assume it is small enough to send in one go.
-        this._logger.rawMessage("out", this.transport, payload);
-        const packetSize = this._infoResponse?.maxPacketSize ?? payload.length;
-        for (let loop = 0; loop < payload.length; loop += packetSize) {
-            await this.writeData(payload.slice(loop, loop + packetSize));
+        if (!this.isConnectedIn || (this._requestTimedOut && result !== InfoResponseMessage)) {
+            throw new Error("Hub connection is unavailable. Please reconnect before trying again.");
         }
+        if (this._pendingMessagesPromises.has(result.Id)) {
+            throw new Error(`A hub request for response 0x${result.Id.toString(16)} is already pending.`);
+        }
+
+        const serialized = message.serialize();
+        const payload = pack(serialized);
+        const requestId = serialized[0];
+        const packetSize = this._infoResponse?.maxPacketSize ?? payload.length;
+        if (!Number.isInteger(packetSize) || packetSize <= 0) {
+            throw new Error(`Invalid hub packet size: ${packetSize}`);
+        }
+
+        const resultPromise = new Promise<BaseMessage>((resolve, reject) => {
+            let response: BaseMessage | undefined;
+            let written = false;
+            const finish = () => {
+                clearTimeout(timeout);
+                if (this._pendingMessagesPromises.get(result.Id) === pending) {
+                    this._pendingMessagesPromises.delete(result.Id);
+                }
+            };
+            const resolveIfComplete = () => {
+                if (written && response) {
+                    finish();
+                    resolve(response);
+                }
+            };
+            const pending: PendingMessage = {
+                resolve: value => {
+                    response = value;
+                    resolveIfComplete();
+                },
+                reject: error => {
+                    finish();
+                    reject(error);
+                },
+            };
+            const timeout = setTimeout(() => {
+                const error = new Error(
+                    `Hub request 0x${requestId.toString(16)} timed out after ${this.requestTimeoutMs / 1000} seconds. Please reconnect.`,
+                );
+                this._requestTimedOut = true;
+                this.rejectPendingMessages(error);
+                void this.disconnect().catch(disconnectError => {
+                    this._logger.error(`Unable to disconnect unresponsive hub: ${disconnectError}`);
+                });
+            }, this.requestTimeoutMs);
+            this._pendingMessagesPromises.set(result.Id, pending);
+
+            void this.writeMessage(payload, packetSize, result.Id, pending).then(
+                () => {
+                    written = true;
+                    resolveIfComplete();
+                },
+                error => {
+                    pending.reject(error instanceof Error ? error : new Error(String(error)));
+                },
+            );
+        });
 
         return resultPromise as Promise<U>;
     }
 
+    private async writeMessage(
+        payload: Uint8Array,
+        packetSize: number,
+        responseId: number,
+        pending: PendingMessage,
+    ) {
+        this._logger.rawMessage("out", this.transport, payload);
+        for (let loop = 0; loop < payload.length; loop += packetSize) {
+            if (this._pendingMessagesPromises.get(responseId) !== pending) {
+                return;
+            }
+            const write = this.writeData(payload.slice(loop, loop + packetSize));
+            if (!write) {
+                throw new Error("Hub transport is unavailable.");
+            }
+            await write;
+        }
+    }
+
+    private rejectPendingMessages(error: Error) {
+        for (const pending of this._pendingMessagesPromises.values()) {
+            pending.reject(error);
+        }
+    }
+
     protected onData(data: Uint8Array) {
         this._logger.rawMessage("in", this.transport, data);
+        const bodyStart = data[0] === 0x01 ? 1 : 0;
+        const bodyLength = data.length - bodyStart - 1;
+        if (
+            data[data.length - 1] === 0x02 &&
+            (bodyLength === 0 || (bodyLength === 1 && data[bodyStart] === 0x00))
+        ) {
+            // Empty framing carries no message ID; retain it only in the raw log.
+            return;
+        }
+
         let unpacked: Uint8Array | undefined;
         try {
             unpacked = unpack(data);
             const [messageId, resultMessage] = deserializeMessage(unpacked);
             const pendingMessage = this._pendingMessagesPromises.get(messageId);
             if (pendingMessage) {
-                const [resolve] = pendingMessage;
-                resolve(resultMessage);
-                this._pendingMessagesPromises.delete(messageId);
+                if (resultMessage instanceof InfoResponseMessage) {
+                    this._requestTimedOut = false;
+                }
+                pendingMessage.resolve(resultMessage);
             }
             else if (
                 resultMessage instanceof ProgramFlowNotificationMessage
@@ -261,12 +352,20 @@ export abstract class BaseClient {
             }
         }
         catch (e) {
+            if (unpacked) {
+                this._pendingMessagesPromises.get(unpacked[0])?.reject(
+                    new Error(`Invalid hub response: ${e}`),
+                );
+            }
             const frame = unpacked ?? data;
             const hex = [...frame]
                 .map(byte => byte.toString(16).padStart(2, "0"))
                 .join(" ");
+            const rawHex = [...data]
+                .map(byte => byte.toString(16).padStart(2, "0"))
+                .join(" ");
             this._logger.error(
-                `Error deserializing message (${frame.length} bytes: ${hex}): ${e}`,
+                `Error deserializing message (${frame.length} bytes: ${hex}; raw ${data.length} bytes: ${rawHex}): ${e}`,
             );
         }
     }
@@ -281,7 +380,7 @@ export abstract class BaseClient {
         this._hubName = undefined;
         this._macAddress = undefined;
         this._isConnectionLogged = false;
-        this._pendingMessagesPromises.clear();
+        this.rejectPendingMessages(new Error("Hub disconnected during a request."));
 
         this.onClosed.fire();
     }

@@ -38,6 +38,8 @@ The default keyboard shortcuts apply only while a hub is connected and the activ
 
 These scoped shortcuts replace the normal Python debug actions only for connected LEGO program files.
 
+Only one upload can run at a time. If the hub disconnects or a request does not complete within 10 seconds, the upload fails and its progress notification closes. After a timeout, reconnect the hub before retrying.
+
 ### Live Data
 
 The **LEGO Hub: Live Data** view displays live telemetry from the connected hub: battery level, Bluetooth state, hub orientation, motor positions, and values from color, force, distance, and matrix devices. The dashboard adapts to the available width, supports optional detailed values and raw telemetry, and marks ports without connected devices.
@@ -72,6 +74,8 @@ The plugin has a settings where you can specify an external program/script that 
 to the hub. This will receive the contents of the file as stdin. It should output the resulting file contents to stdout and exit the process with `0`.
 
 The custom preprocessor runs immediately before compiling and uploading the main program. Automatically discovered local modules are uploaded separately and are not passed through the custom preprocessor.
+
+If the preprocessor cannot start, exits unsuccessfully, or runs longer than 30 seconds, the upload fails and its progress notification closes. A timed-out preprocessor is terminated.
 
 > [!NOTE]  
 > This is not supported for web extension usage.

@@ -16,6 +16,7 @@ import {
     startProgramInSlot,
     uploadFileToHub,
     uploadProgramToHub,
+    withUploadProgress,
 } from "../shared-extension";
 import {
     Command,
@@ -67,7 +68,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            await vscode.window.withProgress(
+            await withUploadProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
                     title: programInfo.isAutostartIn

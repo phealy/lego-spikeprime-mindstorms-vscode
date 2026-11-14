@@ -78,15 +78,24 @@ export class UsbClient extends BaseClient {
     }
 
     protected async writeData(data: Buffer): Promise<void> {
+        const port = this._serialPort;
+        if (!port?.isOpen) {
+            throw new Error("USB hub is disconnected.");
+        }
         return new Promise<void>((resolve, reject) => {
-            this._serialPort?.write(data);
-            this._serialPort?.drain((err) => {
-                if (err) {
-                    reject(err);
+            port.write(data, (writeError) => {
+                if (writeError) {
+                    reject(writeError);
+                    return;
                 }
-                else {
-                    resolve();
-                }
+                port.drain((err) => {
+                    if (err) {
+                        reject(err);
+                    }
+                    else {
+                        resolve();
+                    }
+                });
             });
         });
     }

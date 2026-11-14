@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Ignore empty inbound hub frames and include raw frame bytes in deserialization errors to help diagnose malformed messages.
 - Find included files and imported Python modules in parent directories up to the project root.
 - Timestamp LEGO Hub terminal lines and log the start and successful completion of Upload All operations.
 - Log hub discovery, connection, and disconnection with the hub name and Bluetooth MAC address.

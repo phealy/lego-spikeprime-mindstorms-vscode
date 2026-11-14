@@ -18,6 +18,7 @@ let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
 let showCurrentProgramProgress = true;
 let client: BaseClient | undefined;
+let uploadInProgress = false;
 const LEGO_PROGRAM_HEADER_CONTEXT = "lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader";
 
 export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
@@ -336,7 +337,25 @@ export async function uploadProgramToHub(
 }
 
 export async function clearProgramSlot(slotId: number) {
-    await client!.clearSlot(slotId);
+    if (!await client!.clearSlot(slotId)) {
+        throw new Error(`Failed to clear program slot ${slotId}.`);
+    }
+}
+
+export async function withUploadProgress(
+    options: vscode.ProgressOptions,
+    upload: (progress: vscode.Progress<{ message?: string, increment?: number }>) => Promise<void>,
+) {
+    if (uploadInProgress) {
+        throw new Error("An upload is already in progress. Wait for it to finish before uploading again.");
+    }
+    uploadInProgress = true;
+    try {
+        await vscode.window.withProgress(options, upload);
+    }
+    finally {
+        uploadInProgress = false;
+    }
 }
 
 export async function uploadFileToHub(
@@ -347,11 +366,18 @@ export async function uploadFileToHub(
     displayFileName = fileName,
 ) {
     const uploadSize = data.length;
+    const uploadClient = client;
+    if (!uploadClient?.isConnectedIn) {
+        throw new Error("Hub disconnected before file upload.");
+    }
+    const blockSize = uploadClient.maxChunkSize;
+    if (blockSize === undefined || !Number.isInteger(blockSize) || blockSize <= 0) {
+        throw new Error(`Invalid hub upload chunk size: ${blockSize}`);
+    }
 
     logger.info(formatProgramLog(slotId, `uploading ${displayFileName}...`));
-    await client!.startFileUpload(fileName, slotId, crc32WithAlignment(data));
+    await uploadClient.startFileUpload(fileName, slotId, crc32WithAlignment(data));
 
-    const blockSize: number = client!.maxChunkSize!;
     const increment = (1 / Math.ceil(uploadSize / blockSize)) * 100;
     let runningCrc = 0;
 
@@ -359,7 +385,7 @@ export async function uploadFileToHub(
         const chunk = data.slice(loop, loop + blockSize);
         runningCrc = crc32WithAlignment(chunk, runningCrc);
 
-        await client!.transferChunk(chunk, runningCrc);
+        await uploadClient.transferChunk(chunk, runningCrc);
 
         progress?.report({ increment });
     }
