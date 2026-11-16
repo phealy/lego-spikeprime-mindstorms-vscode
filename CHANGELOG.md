@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Default chat starts and run-enabled uploads to event-driven completion waits; support opting out with `waitForCompletion: false` and waiting later with `#legoWait`.
+- Add Copilot Chat tools for program upload/start/stop, recent logs, fresh telemetry, Bluetooth/USB discovery and connection, and hub disconnection (requires VS Code 1.95+).
+- Clear the LEGO Hub terminal before execution by default, configurable with `clearTerminalOnExecution`.
+
+- Cancel active hub operations and close their progress notifications and input prompts on disconnect, releasing stale upload locks before reconnecting.
+
 - Ignore empty inbound hub frames and include raw frame bytes in deserialization errors to help diagnose malformed messages.
 - Find included files and imported Python modules in parent directories up to the project root.
 - Timestamp LEGO Hub terminal lines and log the start and successful completion of Upload All operations.

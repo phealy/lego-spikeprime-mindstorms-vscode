@@ -1,7 +1,9 @@
 import * as vscode from "vscode";
 
 import { BaseClient } from "./clients/base-client";
+import { HubDisconnectedError, HubOperation } from "./hub-operation";
 import { Logger } from "./logger";
+import { ProgramRuns } from "./program-runs";
 import {
     Command,
     crc32WithAlignment,
@@ -12,13 +14,15 @@ import {
 
 const writeEmitter = new vscode.EventEmitter<string>();
 const logger = new Logger(writeEmitter);
+export const programRuns = new ProgramRuns(() => logger.readOutput());
 let terminal: vscode.Terminal | null;
-let hubStatusBarItem: vscode.StatusBarItem;
+let hubStatusBarItem: vscode.StatusBarItem | undefined;
 let currentStartedProgramSlotId: number | undefined;
 let currentStartedProgramResolve: (() => void) | undefined;
 let showCurrentProgramProgress = true;
 let client: BaseClient | undefined;
-let uploadInProgress = false;
+let uploadOperation: HubOperation | undefined;
+const hubPopups = new Set<() => void>();
 const LEGO_PROGRAM_HEADER_CONTEXT = "lego-spikeprime-mindstorms-vscode.hasLegoProgramHeader";
 
 export function configureRawMessageLogging(context: vscode.ExtensionContext): void {
@@ -37,20 +41,32 @@ export function configureRawMessageLogging(context: vscode.ExtensionContext): vo
 
 export function initClient<U extends BaseClient>(clientClass: new (logger: Logger) => U): void {
     const initializedClient = new clientClass(logger);
+    programRuns.supersede();
     client = initializedClient;
 
     initializedClient.onClosed.event(() => {
-        void updateHubStatusBarItem();
+        if (client !== initializedClient) {
+            return;
+        }
+        for (const close of hubPopups) {
+            close();
+        }
+        currentStartedProgramResolve?.();
         currentStartedProgramSlotId = undefined;
         currentStartedProgramResolve = undefined;
         showCurrentProgramProgress = true;
         if (client === initializedClient) {
             client = undefined;
+            uploadOperation = undefined;
+            void updateHubStatusBarItem();
         }
     });
 
     initializedClient.onProgramRunningChanged.event((isRunningIn) => {
-        if (isRunningIn && currentStartedProgramSlotId !== undefined && showCurrentProgramProgress) {
+        if (client !== initializedClient) {
+            return;
+        }
+        if (isRunningIn && currentStartedProgramSlotId !== undefined && showCurrentProgramProgress && !currentStartedProgramResolve) {
             void vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
@@ -58,11 +74,14 @@ export function initClient<U extends BaseClient>(clientClass: new (logger: Logge
                     cancellable: true,
                 },
                 (progress, token) => new Promise<void>((resolve, reject) => {
-                    currentStartedProgramResolve = resolve;
-                    token.onCancellationRequested(() => {
+                    const cancellation = token.onCancellationRequested(() => {
                         void terminateCurrentProgram();
-                        resolve();
+                        currentStartedProgramResolve?.();
                     });
+                    currentStartedProgramResolve = () => {
+                        cancellation.dispose();
+                        resolve();
+                    };
                 }),
             );
         }
@@ -111,13 +130,22 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
             return;
         }
 
-        await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Disconnecting from Hub...",
-            },
-            () => client!.disconnect(),
-        );
+        try {
+            await withHubOperation(operation => withHubProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: "Disconnecting from Hub...",
+                },
+                () => operation.client.disconnect(),
+                operation,
+            ));
+        }
+        catch (error) {
+            if (!(error instanceof HubDisconnectedError)) {
+                logger.error(`Unable to disconnect hub: ${error}`);
+                vscode.window.showErrorMessage(`Disconnecting from Hub Failed! ${error}`);
+            }
+        }
     });
 
     const setHubNameCommand = vscode.commands.registerCommand(Command.SetHubName, async () => {
@@ -126,32 +154,37 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const name = await vscode.window.showInputBox({
-            prompt: "Enter a new hub name",
-            validateInput: validateHubName,
-        });
-        if (name === undefined) {
-            return;
-        }
-
         try {
-            const success = await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: "Setting LEGO Hub Name...",
-                },
-                () => client!.setHubName(name),
-            );
+            await withHubOperation(async operation => {
+                const name = await operation.wait(() => vscode.window.showInputBox({
+                    prompt: "Enter a new hub name",
+                    validateInput: validateHubName,
+                }, operation.token));
+                if (name === undefined) {
+                    return;
+                }
+                const success = await withHubProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: "Setting LEGO Hub Name...",
+                    },
+                    () => operation.client.setHubName(name),
+                    operation,
+                );
 
-            if (!success) {
-                vscode.window.showErrorMessage("Setting hub name not acknowledged by hub!");
-                return;
-            }
+                if (!success) {
+                    vscode.window.showErrorMessage("Setting hub name not acknowledged by hub!");
+                    return;
+                }
 
-            await updateHubStatusBarItem();
-            vscode.window.showInformationMessage(`LEGO Hub renamed to "${name}".`);
+                await updateHubStatusBarItem();
+                vscode.window.showInformationMessage(`LEGO Hub renamed to "${name}".`);
+            });
         }
         catch (e) {
+            if (e instanceof HubDisconnectedError) {
+                return;
+            }
             console.error(e);
             vscode.window.showErrorMessage("Setting Hub Name Failed!" + (e instanceof Error ? ` ${e.message}` : ""));
         }
@@ -164,11 +197,15 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
         }
 
         try {
-            const slotId = await promptForSlot();
-
-            await startProgramInSlot(slotId);
+            await withHubOperation(async operation => {
+                const slotId = await promptForSlot(undefined, undefined, operation);
+                await startProgramInSlot(slotId, true, operation);
+            });
         }
         catch (e) {
+            if (e instanceof HubDisconnectedError) {
+                return;
+            }
             console.error(e);
             vscode.window.showErrorMessage("Starting Program Failed!" + (e instanceof Error ? ` ${e.message}` : ""));
         }
@@ -196,6 +233,7 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
             // Prompt for auto start
             const isAutostart = await new Promise<boolean | undefined>(resolve => {
                 const input = vscode.window.createQuickPick();
+                const popup = registerHubPopup(() => input.hide());
 
                 input.title = "Autostart";
                 input.step = 2;
@@ -212,6 +250,7 @@ export function registerSharedCommands(context: vscode.ExtensionContext): void {
                     input.hide();
                 });
                 input.onDidHide(() => {
+                    popup.dispose();
                     input.dispose();
                     resolve(undefined);
                 });
@@ -268,7 +307,7 @@ export function initHubStatusBarItems(context: vscode.ExtensionContext) {
     context.subscriptions.push(hubStatusBarItem);
 }
 
-export async function getProgramInfo(): Promise<{
+export async function getProgramInfo(operation?: HubOperation): Promise<{
     slotId: number,
     isAutostartIn: boolean,
     includeFileNames: string[],
@@ -280,7 +319,12 @@ export async function getProgramInfo(): Promise<{
         return;
     }
 
-    await vscode.commands.executeCommand("workbench.action.files.save");
+    if (operation) {
+        await operation.wait(() => vscode.commands.executeCommand("workbench.action.files.save"));
+    }
+    else {
+        await vscode.commands.executeCommand("workbench.action.files.save");
+    }
 
     const header = editor?.document.lineAt(0).text;
     const { isAutostartIn, includeFileNames, slotId: parsedSlotId } =
@@ -291,7 +335,7 @@ export async function getProgramInfo(): Promise<{
     if (isNaN(slotId)
         || slotId < 0
         || slotId > 19) {
-        slotId = await promptForSlot();
+        slotId = await promptForSlot(undefined, undefined, operation);
         if (isNaN(slotId)) {
             return;
         }
@@ -301,16 +345,20 @@ export async function getProgramInfo(): Promise<{
 }
 
 export async function onHubConnected() {
-    try {
-        await client?.loadHubName();
-    }
-    catch (e) {
-        logger.error("Unable to read hub name: " + (e instanceof Error ? e.message : e));
-    }
+    await withHubOperation(async operation => {
+        try {
+            await operation.wait(() => operation.client.loadHubName());
+        }
+        catch (e) {
+            operation.check();
+            logger.error("Unable to read hub name: " + (e instanceof Error ? e.message : e));
+        }
 
-    client?.logConnected();
-    await updateHubStatusBarItem();
-    showTerminal();
+        operation.check();
+        operation.client.logConnected();
+        await operation.wait(updateHubStatusBarItem);
+        showTerminal();
+    });
 }
 
 export async function onDeactivate() {
@@ -326,6 +374,7 @@ export async function uploadProgramToHub(
     slotId: number,
     isCompiledIn: boolean,
     progress?: vscode.Progress<{ increment: number }>,
+    operation?: HubOperation,
 ) {
     await uploadFileToHub(
         data,
@@ -333,28 +382,76 @@ export async function uploadProgramToHub(
         slotId,
         progress,
         sourceFileName,
+        operation,
     );
 }
 
-export async function clearProgramSlot(slotId: number) {
-    if (!await client!.clearSlot(slotId)) {
+export async function clearProgramSlot(slotId: number, operation?: HubOperation) {
+    const success = await (operation
+        ? operation.wait(() => operation.client.clearSlot(slotId))
+        : getConnectedClient().clearSlot(slotId));
+    if (!success) {
         throw new Error(`Failed to clear program slot ${slotId}.`);
     }
 }
 
-export async function withUploadProgress(
-    options: vscode.ProgressOptions,
-    upload: (progress: vscode.Progress<{ message?: string, increment?: number }>) => Promise<void>,
-) {
-    if (uploadInProgress) {
-        throw new Error("An upload is already in progress. Wait for it to finish before uploading again.");
+function getConnectedClient(): BaseClient {
+    if (!client?.isConnectedIn) {
+        throw new HubDisconnectedError();
     }
-    uploadInProgress = true;
+    return client;
+}
+
+export function registerHubPopup(close: () => void): vscode.Disposable {
+    hubPopups.add(close);
+    return new vscode.Disposable(() => hubPopups.delete(close));
+}
+
+export async function withHubOperation<T>(
+    task: (operation: HubOperation) => Promise<T>,
+    hub = getConnectedClient(),
+    token?: vscode.CancellationToken,
+): Promise<T> {
+    const operation = new HubOperation(hub, token);
     try {
-        await vscode.window.withProgress(options, upload);
+        return await operation.wait(() => task(operation));
     }
     finally {
-        uploadInProgress = false;
+        operation.dispose();
+    }
+}
+
+export async function withHubProgress<T>(
+    options: vscode.ProgressOptions,
+    task: (progress: vscode.Progress<{ message?: string, increment?: number }>) => Promise<T>,
+    operation?: HubOperation,
+): Promise<T> {
+    if (!operation) {
+        return withHubOperation(active => withHubProgress(options, task, active));
+    }
+    return vscode.window.withProgress(options, progress => operation.wait(() => task(progress)));
+}
+
+export async function withUploadProgress(
+    options: vscode.ProgressOptions,
+    upload: (progress: vscode.Progress<{ message?: string, increment?: number }>, operation: HubOperation) => Promise<void>,
+    operation?: HubOperation,
+): Promise<void> {
+    if (!operation) {
+        return withHubOperation(active => withUploadProgress(options, upload, active));
+    }
+    operation.check();
+    if (uploadOperation && !uploadOperation.token.isCancellationRequested) {
+        throw new Error("An upload is already in progress. Wait for it to finish before uploading again.");
+    }
+    uploadOperation = operation;
+    try {
+        await withHubProgress(options, progress => upload(progress, operation), operation);
+    }
+    finally {
+        if (uploadOperation === operation) {
+            uploadOperation = undefined;
+        }
     }
 }
 
@@ -364,9 +461,11 @@ export async function uploadFileToHub(
     slotId: number,
     progress?: vscode.Progress<{ increment: number }>,
     displayFileName = fileName,
+    operation?: HubOperation,
 ) {
     const uploadSize = data.length;
-    const uploadClient = client;
+    operation?.check();
+    const uploadClient = operation?.client ?? client;
     if (!uploadClient?.isConnectedIn) {
         throw new Error("Hub disconnected before file upload.");
     }
@@ -376,7 +475,8 @@ export async function uploadFileToHub(
     }
 
     logger.info(formatProgramLog(slotId, `uploading ${displayFileName}...`));
-    await uploadClient.startFileUpload(fileName, slotId, crc32WithAlignment(data));
+    const start = () => uploadClient.startFileUpload(fileName, slotId, crc32WithAlignment(data));
+    await (operation ? operation.wait(start) : start());
 
     const increment = (1 / Math.ceil(uploadSize / blockSize)) * 100;
     let runningCrc = 0;
@@ -385,42 +485,78 @@ export async function uploadFileToHub(
         const chunk = data.slice(loop, loop + blockSize);
         runningCrc = crc32WithAlignment(chunk, runningCrc);
 
-        await uploadClient.transferChunk(chunk, runningCrc);
+        const transfer = () => uploadClient.transferChunk(chunk, runningCrc);
+        await (operation ? operation.wait(transfer) : transfer());
 
         progress?.report({ increment });
     }
     logger.info("done.\r\n");
 }
 
-export async function startProgramInSlot(slotId: number, showProgress = true) {
+export async function startProgramInSlot(slotId: number, showProgress = true, operation?: HubOperation): Promise<string | undefined> {
     if (isNaN(slotId)) {
         return;
     }
 
-    logger.info(formatProgramLog(slotId, "starting program.\r\n"));
-    const startProgram = () => client!.startStopProgram(slotId);
-    showCurrentProgramProgress = showProgress;
-    const success = showProgress
-        ? await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: `Starting Program in Slot #${slotId}...`,
-            },
-            startProgram,
-        )
-        : await startProgram();
-
-    if (!success) {
-        showCurrentProgramProgress = true;
-        vscode.window.showErrorMessage("Starting program not acknowledged from hub!");
-        return;
+    if (!operation) {
+        return withHubOperation(active => startProgramInSlot(slotId, showProgress, active));
     }
+    operation.check();
+    const runId = programRuns.begin(operation.client, slotId);
+    if (vscode.workspace.getConfiguration("legoSpikePrimeMindstorms").get<boolean>("clearTerminalOnExecution", true)) {
+        logger.clear();
+    }
+    logger.info(formatProgramLog(slotId, "starting program.\r\n"));
+    const startProgram = () => operation.wait(() => operation.client.startStopProgram(slotId));
+    showCurrentProgramProgress = showProgress;
+    try {
+        const success = showProgress
+            ? await withHubProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Starting Program in Slot #${slotId}...`,
+                },
+                startProgram,
+                operation,
+            )
+            : await startProgram();
 
-    currentStartedProgramSlotId = slotId;
+        if (!success) {
+            throw new Error("Starting program not acknowledged from hub!");
+        }
+        currentStartedProgramSlotId = slotId;
+        return runId;
+    }
+    catch (error) {
+        programRuns.fail(runId, error);
+        showCurrentProgramProgress = true;
+        throw error;
+    }
 }
 
-async function promptForSlot(currentStep?: number, totalSteps?: number): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
+export async function stopProgramInSlot(slotId: number, operation?: HubOperation): Promise<void> {
+    if (!operation) {
+        return withHubOperation(active => stopProgramInSlot(slotId, active));
+    }
+    const success = await withHubProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: "Terminating Running Program...",
+        },
+        () => operation.client.startStopProgram(slotId, true),
+        operation,
+    );
+    if (!success) {
+        throw new Error("Terminating program not acknowledged from hub!");
+    }
+    if (currentStartedProgramSlotId === slotId) {
+        currentStartedProgramSlotId = undefined;
+    }
+}
+
+async function promptForSlot(currentStep?: number, totalSteps?: number, operation?: HubOperation): Promise<number> {
+    operation?.check();
+    return new Promise<number>((resolve) => {
         const quickPickSlots: vscode.QuickPickItem[] = [];
         for (let index = 0; index < 20; index++) {
             quickPickSlots.push({
@@ -429,6 +565,8 @@ async function promptForSlot(currentStep?: number, totalSteps?: number): Promise
         }
 
         const input = vscode.window.createQuickPick();
+        const popup = registerHubPopup(() => input.hide());
+        const cancellation = operation?.token.onCancellationRequested(() => input.hide());
 
         input.title = "Program Slot";
         input.step = currentStep;
@@ -442,6 +580,8 @@ async function promptForSlot(currentStep?: number, totalSteps?: number): Promise
             input.hide();
         });
         input.onDidHide(() => {
+            popup.dispose();
+            cancellation?.dispose();
             input.dispose();
             resolve(NaN);
         });
@@ -485,34 +625,25 @@ async function terminateCurrentProgram() {
     }
 
     try {
-        const success = await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Terminating Running Program...",
-            },
-            () => client!.startStopProgram(currentStartedProgramSlotId!, true),
-        );
-
-        if (!success) {
-            vscode.window.showErrorMessage("Terminating program not acknowledged from hub!");
-            return;
-        }
-
-        currentStartedProgramSlotId = undefined;
+        const slotId = currentStartedProgramSlotId;
+        await stopProgramInSlot(slotId);
     }
     catch (e) {
+        if (e instanceof HubDisconnectedError) {
+            return;
+        }
         console.error(e);
         vscode.window.showErrorMessage("Terminating Program Failed!" + (e instanceof Error ? ` ${e.message}` : ""));
     }
 }
 
 async function updateHubStatusBarItem() {
-    if (client?.isConnectedIn) {
+    if (hubStatusBarItem && client?.isConnectedIn) {
         const hubName = client.hubName ? ` ${client.hubName}` : "";
         hubStatusBarItem.text = `$(repl) LEGO Hub:${hubName} Connected (${client.firmwareVersion} / ${client.rpcVersion})`;
         hubStatusBarItem.command = Command.DisconnectFromHub;
     }
-    else {
+    else if (hubStatusBarItem) {
         hubStatusBarItem.text = "$(debug-disconnect) LEGO Hub: Disconnected";
         hubStatusBarItem.command = Command.ConnectToHub;
     }

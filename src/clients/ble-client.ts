@@ -115,7 +115,21 @@ export class BleClient extends BaseClient {
         noble.on("scanStop", onScanStop);
         noble.on("discover", onDiscover);
         try {
-            await noble.waitForPoweredOnAsync();
+            let poweredOnCancellation: vscode.Disposable | undefined;
+            try {
+                await Promise.race([
+                    noble.waitForPoweredOnAsync(),
+                    new Promise<void>(resolve => {
+                        poweredOnCancellation = cancellationToken.onCancellationRequested(resolve);
+                        if (cancellationToken.isCancellationRequested) {
+                            resolve();
+                        }
+                    }),
+                ]);
+            }
+            finally {
+                poweredOnCancellation?.dispose();
+            }
             await startScanning();
             await new Promise<void>((resolve) => {
                 if (cancellationToken.isCancellationRequested) {

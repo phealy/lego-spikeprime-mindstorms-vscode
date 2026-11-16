@@ -5,8 +5,12 @@ import { BaseClient } from "../../clients/base-client";
 import {
     clearProgramSlot,
     getClient,
+    getLogger,
     initClient,
+    registerHubPopup,
+    startProgramInSlot,
     uploadFileToHub,
+    withHubOperation,
     withUploadProgress,
 } from "../../shared-extension";
 
@@ -17,6 +21,7 @@ class UploadTestClient extends BaseClient {
     public startCount = 0;
     public chunks: Uint8Array[] = [];
     public chunkError: Error | undefined;
+    public startProgram: () => Promise<boolean> = async () => true;
 
     public get isConnectedIn() {
         return this.connected;
@@ -40,6 +45,7 @@ class UploadTestClient extends BaseClient {
 
     public async disconnect() {
         this.connected = false;
+        this.onDisconnect();
     }
 
     public async clearSlot() {
@@ -54,7 +60,12 @@ class UploadTestClient extends BaseClient {
         if (this.chunkError) {
             throw this.chunkError;
         }
+
         this.chunks.push(chunk);
+    }
+
+    public startStopProgram() {
+        return this.startProgram();
     }
 
     protected async writeData() {
@@ -127,5 +138,157 @@ suite("Upload Progress Test Suite", () => {
         );
         client.chunkError = undefined;
         await withUploadProgress(options, () => uploadFileToHub(Uint8Array.from([1]), "program.py", 0));
+    });
+
+    test("Disconnect closes stalled progress and releases the lock before old work finishes", async () => {
+        let finishOldWork!: () => void;
+        let entered!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        let continued = false;
+        const oldUpload = withUploadProgress(options, async (progress, operation) => {
+            entered();
+            await operation.wait(() => new Promise<void>(resolve => { finishOldWork = resolve; }));
+            continued = true;
+            await clearProgramSlot(0, operation);
+        });
+        await started;
+        const rejected = assert.rejects(oldUpload, /disconnected/);
+        const disconnected = client.disconnect();
+
+        initClient(UploadTestClient);
+        let finishNewWork!: () => void;
+        let enteredNew!: () => void;
+        const newStarted = new Promise<void>(resolve => { enteredNew = resolve; });
+        const newUpload = withUploadProgress(options, () => new Promise<void>(resolve => {
+            finishNewWork = resolve;
+            enteredNew();
+        }));
+        await newStarted;
+        await disconnected;
+        await rejected;
+        finishOldWork();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        assert.strictEqual(continued, false);
+        await assert.rejects(withUploadProgress(options, async () => { /* concurrent upload */ }), /already in progress/);
+        finishNewWork();
+        await newUpload;
+        await withUploadProgress(options, async () => { /* subsequent upload */ });
+    });
+
+    test("Disconnect settles a stalled program start", async () => {
+        let entered!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        client.startProgram = () => {
+            entered();
+            return new Promise(() => { /* stalled request */ });
+        };
+        const start = startProgramInSlot(2);
+        await started;
+        const rejected = assert.rejects(start, /disconnected/);
+        await client.disconnect();
+        await rejected;
+    });
+
+    test("Chat cancellation settles a stalled start without disconnecting the hub", async () => {
+        const cancellation = new vscode.CancellationTokenSource();
+        let entered!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        client.startProgram = () => {
+            entered();
+            return new Promise(() => { /* stalled request */ });
+        };
+        try {
+            const start = withHubOperation(operation => startProgramInSlot(2, false, operation), client, cancellation.token);
+            await started;
+            const rejected = assert.rejects(start, error => error instanceof vscode.CancellationError);
+            cancellation.cancel();
+            await rejected;
+            assert.strictEqual(client.isConnectedIn, true);
+        }
+        finally {
+            cancellation.dispose();
+        }
+    });
+
+    test("Program execution clears the terminal by default and respects disabling it", async () => {
+        const originalGetConfiguration = vscode.workspace.getConfiguration;
+        const logger = getLogger();
+        const originalClear = logger.clear;
+        let clearCount = 0;
+        let enabled: boolean | undefined;
+        vscode.workspace.getConfiguration = (section, ...args) => {
+            const configuration = originalGetConfiguration(section, ...args);
+            if (section === "legoSpikePrimeMindstorms") {
+                return new Proxy({ ...configuration }, {
+                    get: (target, property) => {
+                        if (property === "get") {
+                            return (key: string, defaultValue?: unknown) => key === "clearTerminalOnExecution"
+                                ? enabled ?? defaultValue
+                                : target.get(key, defaultValue);
+                        }
+                        return Reflect.get(target, property);
+                    },
+                });
+            }
+            return configuration;
+        };
+        logger.clear = () => { clearCount++; };
+
+        try {
+            for (const setting of [undefined, false, true]) {
+                enabled = setting;
+                const before = clearCount;
+                client.startProgram = async () => {
+                    assert.strictEqual(clearCount, before + (setting === false ? 0 : 1));
+                    return true;
+                };
+                await startProgramInSlot(2, setting !== true);
+            }
+            assert.strictEqual(clearCount, 2);
+            await startProgramInSlot(NaN);
+            assert.strictEqual(clearCount, 2);
+            await uploadFileToHub(Uint8Array.from([1]), "program.py", 0);
+            assert.strictEqual(clearCount, 2);
+        }
+        finally {
+            vscode.workspace.getConfiguration = originalGetConfiguration;
+            logger.clear = originalClear;
+        }
+    });
+
+    test("Disconnect settles the running notification without opening duplicate progress", async () => {
+        const original = vscode.window.withProgress;
+        const running: Array<Promise<void>> = [];
+        vscode.window.withProgress = (progressOptions, task) => {
+            const result = original(progressOptions, task);
+            if (progressOptions.title?.startsWith("Running Program")) {
+                running.push(Promise.resolve(result).then(() => { /* notification completed */ }));
+            }
+            return result;
+        };
+        try {
+            await startProgramInSlot(2);
+            client.onProgramRunningChanged.fire(true);
+            client.onProgramRunningChanged.fire(true);
+            assert.strictEqual(running.length, 1);
+            await client.disconnect();
+            await running[0];
+            client.onProgramRunningChanged.fire(true);
+            assert.strictEqual(running.length, 1);
+        }
+        finally {
+            vscode.window.withProgress = original;
+        }
+    });
+
+    test("Disconnect closes registered hub popups and cancels waiting operations", async () => {
+        let closed = false;
+        const popup = registerHubPopup(() => { closed = true; });
+        const waiting = withHubOperation(operation => operation.wait(() => new Promise(() => { /* waiting for input */ })));
+        const rejected = assert.rejects(waiting, /disconnected/);
+        await client.disconnect();
+        await rejected;
+        assert.strictEqual(closed, true);
+        popup.dispose();
     });
 });

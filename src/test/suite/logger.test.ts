@@ -6,6 +6,64 @@ import * as vscode from "vscode";
 import { Logger } from "../../logger";
 
 suite("Logger Test Suite", () => {
+    test("Retains plain timestamped output while preserving colored terminal writes", () => {
+        const emitter = new vscode.EventEmitter<string>();
+        const logger = new Logger(emitter, () => new Date("2026-09-07T12:34:56.789Z"));
+        try {
+            logger.info("upload ");
+            logger.error("failed\r\n");
+            logger.log("\u001b[31mprogram output\u001b[0m\r\n");
+            assert.deepStrictEqual(logger.readOutput(), {
+                text: "[2026-09-07T12:34:56.789Z] upload failed\r\n[2026-09-07T12:34:56.789Z] program output\r\n",
+                truncated: false,
+            });
+        }
+        finally {
+            emitter.dispose();
+        }
+    });
+
+    test("Bounds retained output, reports truncation, and clears the readable buffer", () => {
+        const emitter = new vscode.EventEmitter<string>();
+        const logger = new Logger(emitter);
+        try {
+            logger.log("x".repeat(70000));
+            assert.deepStrictEqual(logger.readOutput(32768), { text: "x".repeat(32768), truncated: true });
+            assert.deepStrictEqual(logger.readOutput(3), { text: "xxx", truncated: true });
+            for (const limit of [0, -1, 1.5, 32769, NaN]) {
+                assert.throws(() => logger.readOutput(limit), /maxCharacters/);
+            }
+            logger.clear();
+            assert.deepStrictEqual(logger.readOutput(), { text: "", truncated: false });
+            logger.log("new\r\n");
+            assert.ok(logger.readOutput().text.endsWith("] new\r\n"));
+            assert.strictEqual(logger.readOutput().truncated, false);
+        }
+        finally {
+            emitter.dispose();
+        }
+    });
+
+    test("Clears terminal scrollback and restarts timestamps after a partial line", () => {
+        const emitter = new vscode.EventEmitter<string>();
+        const logger = new Logger(emitter, () => new Date("2026-09-07T12:34:56.789Z"));
+        const output: string[] = [];
+        const subscription = emitter.event(text => output.push(text));
+
+        try {
+            logger.log("previous partial line");
+            logger.clear();
+            logger.log("new execution\r\n");
+
+            assert.strictEqual(output[1], "\u001b[3J\u001b[2J\u001b[H");
+            assert.strictEqual(output[2], "[2026-09-07T12:34:56.789Z] new execution\r\n");
+        }
+        finally {
+            subscription.dispose();
+            emitter.dispose();
+        }
+    });
+
     test("Writes blue operation fragments on one terminal line", () => {
         const emitter = new vscode.EventEmitter<string>();
         const logger = new Logger(

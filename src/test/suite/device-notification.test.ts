@@ -40,7 +40,9 @@ suite("Device Notification Test Suite", () => {
             0x0c, 0x02, 0x09, 0x32, 0xff, 0x03, 0x00, 0x00, 0x00, 0x00,
         ]));
 
-        assert.strictEqual(message.devices[0].color, 9);
-        assert.strictEqual(message.devices[0].colorName, "red");
+        const device = message.devices[0];
+        assert.ok(device.type === "color");
+        assert.strictEqual(device.color, 9);
+        assert.strictEqual(device.colorName, "red");
     });
 });

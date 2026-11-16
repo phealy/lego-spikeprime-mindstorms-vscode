@@ -6,11 +6,14 @@ import * as path from "path";
 import { v7 } from "uuid";
 import * as vscode from "vscode";
 
+import { disconnectChatClient, registerChatConnectionTools } from "./chat-connection-tools";
+import { registerChatTools } from "./chat-tools";
 import { BaseClient, HubQuickPickItem } from "./clients/base-client";
 import { BleClient } from "./clients/ble-client";
 import { UsbClient } from "./clients/usb-client";
 import { executeCustomPreprocessor } from "./custom-preprocessor";
 import { findFileInParentDirectories } from "./file-search";
+import { HubDisconnectedError, HubOperation } from "./hub-operation";
 import { registerHubOS3Stubs } from "./pylance-stubs";
 import {
     clearProgramSlot,
@@ -22,10 +25,13 @@ import {
     initHubStatusBarItems,
     onDeactivate,
     onHubConnected,
+    registerHubPopup,
     registerSharedCommands,
     startProgramInSlot,
     uploadFileToHub,
     uploadProgramToHub,
+    withHubOperation,
+    withHubProgress,
     withUploadProgress,
 } from "./shared-extension";
 import {
@@ -77,9 +83,97 @@ export function activate(context: vscode.ExtensionContext) {
     registerHubOS3Stubs(context);
 
     registerSharedCommands(context);
+    registerChatTools(context, (document, slot, includes, progress, operation) =>
+        performUploadProgram(document.fileName, slot, includes, progress, operation),
+    );
 
     const provider = new LiveDataViewProvider(getClient);
     let connectionAttemptInProgress = false;
+    const withConnectionLock = async <T>(task: () => Promise<T>): Promise<T> => {
+        if (connectionAttemptInProgress || getClient()?.isConnectedIn) {
+            throw new Error("A hub is connected or discovery/connection is already in progress. Disconnect or wait before retrying.");
+        }
+        connectionAttemptInProgress = true;
+        try {
+            return await task();
+        }
+        finally {
+            connectionAttemptInProgress = false;
+        }
+    };
+    const connectChatHub = (type: Client, id: string, token: vscode.CancellationToken) =>
+        withConnectionLock(async () => {
+            if (token.isCancellationRequested) {
+                throw new vscode.CancellationError();
+            }
+            initializeClient(type);
+            const connecting = getClient()!;
+            const operation = new HubOperation(connecting, token);
+            try {
+                await connecting.connect(id);
+                operation.check();
+                await operation.wait(() => finishConnection(provider));
+                await operation.wait(() => context.globalState.update(LAST_CONNECTION_KEY, {
+                    client: type,
+                    connectionId: id,
+                } satisfies StoredConnection));
+            }
+            catch (error) {
+                if (connecting.isConnectedIn) {
+                    await disconnectChatClient(connecting);
+                }
+                throw error;
+            }
+            finally {
+                operation.dispose();
+            }
+        });
+    registerChatConnectionTools(context, {
+        scanUsb: token => withConnectionLock(async () => {
+            if (token.isCancellationRequested) {
+                throw new vscode.CancellationError();
+            }
+            const hubs = await new UsbClient(getLogger()).list();
+            if (token.isCancellationRequested) {
+                throw new vscode.CancellationError();
+            }
+            return hubs;
+        }),
+        scanBle: (durationMs, token) => withConnectionLock(async () => {
+            const cancellation = new vscode.CancellationTokenSource();
+            const listener = token.onCancellationRequested(() => cancellation.cancel());
+            const timer = setTimeout(() => cancellation.cancel(), durationMs);
+            if (token.isCancellationRequested) {
+                cancellation.cancel();
+            }
+            try {
+                const hubs = await new BleClient(getLogger()).list(() => { /* snapshot returned when scan ends */ }, cancellation.token);
+                if (token.isCancellationRequested) {
+                    throw new vscode.CancellationError();
+                }
+                return hubs;
+            }
+            finally {
+                clearTimeout(timer);
+                listener.dispose();
+                cancellation.dispose();
+            }
+        }),
+        connectBle: (id, token) => connectChatHub(Client.Ble, id, token),
+        connectUsb: async (id, token) => {
+            if (!id) {
+                const hubs = await new UsbClient(getLogger()).list();
+                if (hubs.length !== 1) {
+                    throw new Error(`Expected one USB LEGO hub, found ${hubs.length}. Available hubs: ${JSON.stringify(hubs.map(hub => ({ name: hub.label, connectionId: hub.connectionId })))}. Supply a connectionId when multiple hubs are attached.`);
+                }
+                id = hubs[0].connectionId;
+            }
+            if (!id) {
+                throw new Error("The USB hub has no serial number.");
+            }
+            await connectChatHub(Client.Usb, id, token);
+        },
+    });
 
     const connectToHubCommand = vscode.commands.registerCommand(
         Command.ConnectToHub,
@@ -108,10 +202,20 @@ export function activate(context: vscode.ExtensionContext) {
                     initializeClient(clientType);
                 }
                 else {
-                    const clientSelection = await vscode.window.showQuickPick(
-                        supportedClients,
-                        { canPickMany: false },
-                    );
+                    const cancellation = new vscode.CancellationTokenSource();
+                    const popup = registerHubPopup(() => cancellation.cancel());
+                    let clientSelection: vscode.QuickPickItem | undefined;
+                    try {
+                        clientSelection = await vscode.window.showQuickPick(
+                            supportedClients,
+                            { canPickMany: false },
+                            cancellation.token,
+                        );
+                    }
+                    finally {
+                        popup.dispose();
+                        cancellation.dispose();
+                    }
                     if (!clientSelection) {
                         return;
                     }
@@ -125,21 +229,28 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                await vscode.window.withProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: "Connecting to Hub...",
-                    },
-                    () => getClient()!.connect(selection.connectionId),
-                );
+                const connectingClient = getClient()!;
+                await withHubOperation(async operation => {
+                    await withHubProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: "Connecting to Hub...",
+                        },
+                        () => connectingClient.connect(selection.connectionId),
+                        operation,
+                    );
 
-                await finishConnection(provider);
-                await context.globalState.update(LAST_CONNECTION_KEY, {
-                    client: clientType,
-                    connectionId: selection.connectionId,
-                } satisfies StoredConnection);
+                    await operation.wait(() => finishConnection(provider));
+                    await operation.wait(() => context.globalState.update(LAST_CONNECTION_KEY, {
+                        client: clientType,
+                        connectionId: selection.connectionId,
+                    } satisfies StoredConnection));
+                }, connectingClient);
             }
             catch (e) {
+                if (e instanceof HubDisconnectedError) {
+                    return;
+                }
                 console.error(e);
                 vscode.window.showErrorMessage(
                     "Connecting to Hub Failed!" +
@@ -163,37 +274,44 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             try {
-                const programInfo = await getProgramInfo();
-                if (!programInfo) {
-                    return;
-                }
+                await withHubOperation(async operation => {
+                    const programInfo = await getProgramInfo(operation);
+                    if (!programInfo) {
+                        return;
+                    }
 
-                await withUploadProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: programInfo.isAutostartIn
-                            ? "Uploading and running program..."
-                            : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
-                    },
-                    async (progress) => {
-                        await performUploadProgram(
-                            vscode.window.activeTextEditor!.document.fileName,
-                            programInfo.slotId,
-                            programInfo.includeFileNames,
-                            progress,
-                        );
-                        if (programInfo.isAutostartIn) {
-                            await setTimeoutAsync(() => { /* noop */ }, 250);
-                            await startProgramInSlot(programInfo.slotId, false);
-                        }
-                    },
-                );
+                    await withUploadProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: programInfo.isAutostartIn
+                                ? "Uploading and running program..."
+                                : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
+                        },
+                        async (progress) => {
+                            await performUploadProgram(
+                                vscode.window.activeTextEditor!.document.fileName,
+                                programInfo.slotId,
+                                programInfo.includeFileNames,
+                                progress,
+                                operation,
+                            );
+                            if (programInfo.isAutostartIn) {
+                                await operation.wait(() => setTimeoutAsync(() => { /* noop */ }, 250));
+                                await startProgramInSlot(programInfo.slotId, false, operation);
+                            }
+                        },
+                        operation,
+                    );
 
-                if (!programInfo.isAutostartIn) {
-                    vscode.window.showInformationMessage("Program uploaded!");
-                }
+                    if (!programInfo.isAutostartIn) {
+                        vscode.window.showInformationMessage("Program uploaded!");
+                    }
+                });
             }
             catch (e) {
+                if (e instanceof HubDisconnectedError) {
+                    return;
+                }
                 console.error(e);
                 vscode.window.showErrorMessage(
                     "Program Upload Failed!" +
@@ -214,65 +332,73 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             try {
-                const resourcePath = resourceUri?.fsPath
+                await withHubOperation(async operation => {
+                    const resourcePath = resourceUri?.fsPath
                     || vscode.window.activeTextEditor?.document.uri.fsPath;
-                if (!resourcePath || !fs.existsSync(resourcePath)) {
-                    throw new Error("Save the active Python file before uploading its folder.");
-                }
-                const folderPath = fs.statSync(resourcePath).isDirectory()
-                    ? resourcePath
-                    : path.dirname(resourcePath);
-                const programs = findLegoPrograms(folderPath);
-                validateLegoProgramManifest(programs.map(program => ({
-                    fileName: program.relativePath,
-                    slotId: program.slotId,
-                })));
+                    if (!resourcePath || !fs.existsSync(resourcePath)) {
+                        throw new Error("Save the active Python file before uploading its folder.");
+                    }
+                    const folderPath = fs.statSync(resourcePath).isDirectory()
+                        ? resourcePath
+                        : path.dirname(resourcePath);
+                    const programs = findLegoPrograms(folderPath);
+                    validateLegoProgramManifest(programs.map(program => ({
+                        fileName: program.relativePath,
+                        slotId: program.slotId,
+                    })));
 
-                for (const program of programs) {
-                    loadIncludeFiles(program.filePath, program.includeFileNames);
-                }
+                    for (const program of programs) {
+                        loadIncludeFiles(program.filePath, program.includeFileNames);
+                    }
 
-                if (programs.length === 0) {
-                    vscode.window.showInformationMessage(
-                        "No Python files with a LEGO header were found.",
+                    if (programs.length === 0) {
+                        vscode.window.showInformationMessage(
+                            "No Python files with a LEGO header were found.",
+                        );
+                        return;
+                    }
+
+                    programs.sort((left, right) => left.slotId - right.slotId);
+                    const folderName = path.basename(folderPath);
+                    getLogger().info(
+                        `Upload All: starting ${programs.length} programs from ${folderName}.\r\n`,
                     );
-                    return;
-                }
+                    await withUploadProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: `Uploading ${programs.length} LEGO programs...`,
+                        },
+                        async (progress) => {
+                            const increment = 100 / programs.length;
+                            for (const program of programs) {
+                                progress.report({
+                                    message: `${program.relativePath} (slot ${program.slotId})`,
+                                });
+                                await performUploadProgram(
+                                    program.filePath,
+                                    program.slotId,
+                                    program.includeFileNames,
+                                    undefined,
+                                    operation,
+                                );
+                                progress.report({ increment });
+                            }
+                        },
+                        operation,
+                    );
+                    getLogger().info(
+                        `Upload All: finished ${programs.length} programs from ${folderName}.\r\n`,
+                    );
 
-                programs.sort((left, right) => left.slotId - right.slotId);
-                const folderName = path.basename(folderPath);
-                getLogger().info(
-                    `Upload All: starting ${programs.length} programs from ${folderName}.\r\n`,
-                );
-                await withUploadProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: `Uploading ${programs.length} LEGO programs...`,
-                    },
-                    async (progress) => {
-                        const increment = 100 / programs.length;
-                        for (const program of programs) {
-                            progress.report({
-                                message: `${program.relativePath} (slot ${program.slotId})`,
-                            });
-                            await performUploadProgram(
-                                program.filePath,
-                                program.slotId,
-                                program.includeFileNames,
-                            );
-                            progress.report({ increment });
-                        }
-                    },
-                );
-                getLogger().info(
-                    `Upload All: finished ${programs.length} programs from ${folderName}.\r\n`,
-                );
-
-                vscode.window.showInformationMessage(
-                    `${programs.length} LEGO programs uploaded!`,
-                );
+                    vscode.window.showInformationMessage(
+                        `${programs.length} LEGO programs uploaded!`,
+                    );
+                });
             }
             catch (e) {
+                if (e instanceof HubDisconnectedError) {
+                    return;
+                }
                 console.error(e);
                 vscode.window.showErrorMessage(
                     "Upload All Failed!" +
@@ -348,9 +474,11 @@ async function finishConnection(provider: LiveDataViewProvider): Promise<void> {
         provider.setClientStateChanged();
     });
 
-    await onHubConnected();
-    await connectedClient.startDeviceNotifications();
-    provider.setClientStateChanged();
+    await withHubOperation(async operation => {
+        await operation.wait(onHubConnected);
+        await operation.wait(() => connectedClient.startDeviceNotifications());
+        provider.setClientStateChanged();
+    }, connectedClient);
 }
 
 async function reconnectToLastHub(
@@ -359,14 +487,18 @@ async function reconnectToLastHub(
 ): Promise<void> {
     try {
         initializeClient(storedConnection.client);
-        await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Reconnecting to LEGO Hub...",
-            },
-            () => getClient()!.reconnect(storedConnection.connectionId),
-        );
-        await finishConnection(provider);
+        const connectingClient = getClient()!;
+        await withHubOperation(async operation => {
+            await withHubProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: "Reconnecting to LEGO Hub...",
+                },
+                () => connectingClient.reconnect(storedConnection.connectionId),
+                operation,
+            );
+            await operation.wait(() => finishConnection(provider));
+        }, connectingClient);
     }
     catch (error) {
         getLogger().error(
@@ -379,6 +511,7 @@ async function reconnectToLastHub(
 async function showCombinedHubQuickPick(): Promise<CombinedHubQuickPickItem | undefined> {
     const input = vscode.window.createQuickPick<CombinedHubQuickPickItem>();
     const cancellation = new vscode.CancellationTokenSource();
+    const popup = registerHubPopup(() => input.hide());
     const items = new Map<string, CombinedHubQuickPickItem>();
     input.placeholder = "Searching for Bluetooth and USB hubs...";
     input.busy = true;
@@ -422,6 +555,7 @@ async function showCombinedHubQuickPick(): Promise<CombinedHubQuickPickItem | un
         return await selectionPromise;
     }
     finally {
+        popup.dispose();
         cancellation.cancel();
         await Promise.allSettled(listPromises);
         cancellation.dispose();
@@ -432,6 +566,7 @@ async function showCombinedHubQuickPick(): Promise<CombinedHubQuickPickItem | un
 async function showHubQuickPick(client: BaseClient): Promise<HubQuickPickItem | undefined> {
     const input = vscode.window.createQuickPick<HubQuickPickItem>();
     const cancellation = new vscode.CancellationTokenSource();
+    const popup = registerHubPopup(() => input.hide());
     input.placeholder = "Searching for hubs...";
     input.busy = true;
 
@@ -456,6 +591,7 @@ async function showHubQuickPick(client: BaseClient): Promise<HubQuickPickItem | 
         ]);
     }
     finally {
+        popup.dispose();
         cancellation.cancel();
         await listPromise;
         cancellation.dispose();
@@ -473,7 +609,9 @@ async function performUploadProgram(
     slotId: number,
     includeFileNames: string[],
     progress?: vscode.Progress<{ increment: number }>,
+    operation?: HubOperation,
 ) {
+    operation?.check();
     const config = vscode.workspace.getConfiguration();
 
     if (programPath) {
@@ -508,86 +646,93 @@ async function performUploadProgram(
 
         fs.writeFileSync(assembledFilePath, sourceFile);
 
-        if (customPreprocessorPath) {
-            const preprocessedFilePath = await executeCustomPreprocessor(
-                customPreprocessorPath,
-                assembledFilePath,
-                message => {
-                    console.error(message);
-                    vscode.window.showErrorMessage(message);
-                },
-            );
-
-            if (preprocessedFilePath !== assembledFilePath) {
-                if (!isSaveFileToUploadIn) {
-                    // Remove previous temp assembled file
-                    try {
-                        fs.rmSync(assembledFilePath);
-                    }
-                    catch {
-                        // Ignore error if error occurs while deleting the file
-                    }
-                }
-
-                assembledFilePath = preprocessedFilePath;
-            }
-        }
-
-        let compileResult: mpy.CompileResult | undefined;
-        if (compileBeforeUpload) {
-            compileResult = await mpy.compile(
-                path.basename(assembledFilePath),
-                fs.readFileSync(assembledFilePath).toString("utf-8"),
-                [],
-                undefined,
-                mpyWasm,
-            );
-
-            if (compileResult?.status !== 0) {
-                logger?.error(formatProgramLog(
-                    slotId,
-                    `compilation failed for ${path.basename(programPath)}:\r\n`,
-                ));
-                logger?.error(
-                    compileResult.err
-                        .map(error => formatProgramLog(slotId, error))
-                        .join("\r\n") + "\r\n",
+        try {
+            if (customPreprocessorPath) {
+                const preprocessedFilePath = await executeCustomPreprocessor(
+                    customPreprocessorPath,
+                    assembledFilePath,
+                    message => {
+                        console.error(message);
+                        logger.error(message);
+                    },
+                    30000,
+                    operation?.token,
                 );
-                throw new Error("Compilation Failed!");
-            }
-        }
+                if (preprocessedFilePath !== assembledFilePath) {
+                    if (!isSaveFileToUploadIn) {
+                        try {
+                            fs.rmSync(assembledFilePath);
+                        }
+                        catch (error) {
+                            logger.error(`Unable to remove assembled file: ${error}`);
+                        }
+                    }
 
-        const data = compileResult?.mpy ?? fs.readFileSync(assembledFilePath);
-        const auxiliaryFiles = await prepareAuxiliaryFiles(
-            [...includeFiles, ...importedFiles],
-            compileBeforeUpload,
-            slotId,
-        );
-        await clearProgramSlot(slotId);
-        for (const auxiliaryFile of auxiliaryFiles) {
-            await uploadFileToHub(
-                auxiliaryFile.data,
-                auxiliaryFile.name,
+                    assembledFilePath = preprocessedFilePath;
+                }
+                operation?.check();
+            }
+
+            let compileResult: mpy.CompileResult | undefined;
+            if (compileBeforeUpload) {
+                const compile = () => mpy.compile(
+                    path.basename(assembledFilePath),
+                    fs.readFileSync(assembledFilePath).toString("utf-8"),
+                    [],
+                    undefined,
+                    mpyWasm,
+                );
+                compileResult = await (operation ? operation.wait(compile) : compile());
+
+                if (compileResult?.status !== 0) {
+                    logger?.error(formatProgramLog(
+                        slotId,
+                        `compilation failed for ${path.basename(programPath)}:\r\n`,
+                    ));
+                    logger?.error(
+                        compileResult.err
+                            .map(error => formatProgramLog(slotId, error))
+                            .join("\r\n") + "\r\n",
+                    );
+                    throw new Error("Compilation Failed!");
+                }
+            }
+
+            const data = compileResult?.mpy ?? fs.readFileSync(assembledFilePath);
+            const auxiliaryFiles = await prepareAuxiliaryFiles(
+                [...includeFiles, ...importedFiles],
+                compileBeforeUpload,
                 slotId,
-                undefined,
-                auxiliaryFile.sourceName,
+                operation,
+            );
+            await clearProgramSlot(slotId, operation);
+            for (const auxiliaryFile of auxiliaryFiles) {
+                await uploadFileToHub(
+                    auxiliaryFile.data,
+                    auxiliaryFile.name,
+                    slotId,
+                    undefined,
+                    auxiliaryFile.sourceName,
+                    operation,
+                );
+            }
+            await uploadProgramToHub(
+                data,
+                path.basename(programPath),
+                slotId,
+                !!compileResult?.mpy,
+                progress,
+                operation,
             );
         }
-        await uploadProgramToHub(
-            data,
-            path.basename(programPath),
-            slotId,
-            !!compileResult?.mpy,
-            progress,
-        );
-
-        // Remove temp file if needed
-        if (customPreprocessorPath || !isSaveFileToUploadIn) {
-            try {
-                fs.rmSync(assembledFilePath);
-            }
-            catch {
-                // Ignore error if error occurs while deleting the file
+        finally {
+            if (customPreprocessorPath || !isSaveFileToUploadIn) {
+                try {
+                    fs.rmSync(assembledFilePath);
+                }
+                catch (error) {
+                    logger.error(`Unable to remove assembled file: ${error}`);
+                }
             }
         }
     }
@@ -597,23 +742,26 @@ async function prepareAuxiliaryFiles(
     files: Array<{ name: string, data: Uint8Array }>,
     compileBeforeUpload: boolean,
     slotId: number,
+    operation?: HubOperation,
 ): Promise<Array<{ name: string, sourceName: string, data: Uint8Array }>> {
     const logger = getLogger();
     const preparedFiles: Array<{ name: string, sourceName: string, data: Uint8Array }> = [];
 
     for (const file of files) {
+        operation?.check();
         if (!compileBeforeUpload || path.extname(file.name).toLowerCase() !== ".py") {
             preparedFiles.push({ ...file, sourceName: file.name });
             continue;
         }
 
-        const compileResult = await mpy.compile(
+        const compile = () => mpy.compile(
             file.name,
             new TextDecoder().decode(file.data),
             [],
             undefined,
             mpyWasm,
         );
+        const compileResult = await (operation ? operation.wait(compile) : compile());
         if (compileResult.status !== 0 || !compileResult.mpy) {
             logger?.error(formatProgramLog(
                 slotId,

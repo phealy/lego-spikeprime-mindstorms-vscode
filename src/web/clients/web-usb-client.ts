@@ -13,6 +13,11 @@ export class WebUsbClient extends BaseClient {
     private _port: SerialPort | undefined;
     private _writer: WritableStreamDefaultWriter | undefined;
     private _reader: ReadableStreamDefaultReader | undefined;
+    private readonly _onPortDisconnect = () => {
+        void this.disconnect().catch(error => {
+            getLogger().error(`Unable to disconnect USB port: ${error}`);
+        });
+    };
 
     public get isConnectedIn(): boolean {
         return this._port?.readable !== undefined && this._port?.writable !== undefined;
@@ -45,7 +50,7 @@ export class WebUsbClient extends BaseClient {
 
         await this._port.open({ baudRate: 115200 });
 
-        this._port.ondisconnect = this.disconnect.bind(this);
+        this._port.addEventListener("disconnect", this._onPortDisconnect);
 
         void this.readerLoop();
 
@@ -67,21 +72,44 @@ export class WebUsbClient extends BaseClient {
     }
 
     public async disconnect(): Promise<void> {
-        try {
-            await this._reader?.cancel();
-            this._reader?.releaseLock();
-            await this._port?.readable?.cancel();
+        const port = this._port;
+        const reader = this._reader;
+        const writer = this._writer;
+        if (!port) {
+            return;
         }
-        catch {
-            // DO NOTHING
-        }
-
-        await this._writer?.close();
-        this._writer?.releaseLock();
-
-        await this._port?.close();
-
+        port.removeEventListener("disconnect", this._onPortDisconnect);
         this.onDisconnect();
+
+        const results = await Promise.allSettled([
+            (async () => {
+                try {
+                    await reader?.cancel();
+                }
+                finally {
+                    reader?.releaseLock();
+                }
+            })(),
+            (async () => {
+                try {
+                    await writer?.abort();
+                }
+                finally {
+                    writer?.releaseLock();
+                }
+            })(),
+        ]);
+        for (const result of results) {
+            if (result.status === "rejected") {
+                getLogger().error(`Unable to release disconnected USB stream: ${result.reason}`);
+            }
+        }
+        try {
+            await port.close();
+        }
+        catch (error) {
+            getLogger().error(`Unable to close disconnected USB port: ${error}`);
+        }
     }
 
     protected writeData(data: Buffer): Promise<void> | undefined {
@@ -98,11 +126,12 @@ export class WebUsbClient extends BaseClient {
 
     private async readerLoop() {
         while (this._port?.readable && !this._port.readable.locked) {
-            this._reader = this._port?.readable.pipeThrough(new TransformStream(new MessageTransformer())).getReader();
+            const reader = this._port.readable.pipeThrough(new TransformStream(new MessageTransformer())).getReader();
+            this._reader = reader;
             try {
                 while (true) {
-                    const { value, done } = await this._reader.read();
-                    if (done) {
+                    const { value, done } = await reader.read();
+                    if (done || this._reader !== reader) {
                         break;
                     }
 
@@ -113,7 +142,7 @@ export class WebUsbClient extends BaseClient {
                 getLogger().error(`Error reading from USB port:${error instanceof Error ? ` ${error.message}` : error}`);
             }
             finally {
-                this._reader.releaseLock();
+                reader.releaseLock();
             }
         }
     }

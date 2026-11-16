@@ -6,6 +6,8 @@ export class Logger {
     private rawLogFlush: ReturnType<typeof setTimeout> | undefined;
     private rawLogWrite = Promise.resolve();
     private isAtLineStart = true;
+    private output = "";
+    private outputTruncated = false;
 
     constructor(
         private writeEvent: vscode.EventEmitter<string>,
@@ -16,16 +18,33 @@ export class Logger {
         return this.rawLogUri?.toString(true);
     }
 
+    public clear() {
+        this.isAtLineStart = true;
+        this.output = "";
+        this.outputTruncated = false;
+        this.writeEvent.fire("\u001b[3J\u001b[2J\u001b[H");
+    }
+
+    public readOutput(maxCharacters = 16000): { text: string, truncated: boolean } {
+        if (!Number.isInteger(maxCharacters) || maxCharacters < 1 || maxCharacters > 32768) {
+            throw new Error("maxCharacters must be an integer from 1 to 32768.");
+        }
+        return {
+            text: this.output.slice(-maxCharacters),
+            truncated: this.outputTruncated || this.output.length > maxCharacters,
+        };
+    }
+
     public info(text: string) {
-        this.writeEvent.fire(`\u001b[36m${this.addTimestamps(text)}\u001b[0m`);
+        this.write(text, "\u001b[36m", "\u001b[0m");
     }
 
     public error(text: string) {
-        this.writeEvent.fire(`\u001b[31m${this.addTimestamps(text)}\u001b[0m`);
+        this.write(text, "\u001b[31m", "\u001b[0m");
     }
 
     public log(text: string) {
-        this.writeEvent.fire(this.addTimestamps(text));
+        this.write(text);
     }
 
     public configureRawMessageLog(logUri: vscode.Uri) {
@@ -80,5 +99,21 @@ export class Logger {
         }
 
         return timestampedText;
+    }
+
+    private write(text: string, prefix = "", suffix = "") {
+        const timestamped = this.addTimestamps(text);
+        // Strip ANSI sequences emitted by programs as well as extension colors.
+        const plainText = timestamped.replace(
+            // eslint-disable-next-line no-control-regex
+            /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-_])/g,
+            "",
+        );
+        this.output += plainText;
+        if (this.output.length > 65536) {
+            this.output = this.output.slice(-65536);
+            this.outputTruncated = true;
+        }
+        this.writeEvent.fire(`${prefix}${timestamped}${suffix}`);
     }
 }

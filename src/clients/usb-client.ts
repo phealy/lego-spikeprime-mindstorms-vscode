@@ -25,17 +25,21 @@ export class UsbClient extends BaseClient {
         return ports
             .filter((port) => port.vendorId === VENDOR_ID && port.productId === PRODUCT_ID)
             .map((port) => {
+                if (!port.serialNumber) {
+                    throw new Error(`LEGO USB hub on ${port.path} has no serial number and cannot be selected.`);
+                }
                 return {
                     label: port.path,
                     description: port.serialNumber,
-                    connectionId: port.serialNumber!,
+                    connectionId: port.serialNumber,
                 };
             }) satisfies HubQuickPickItem[];
     }
 
     public async connect(peripheralUuid: string) {
         const ports = await SerialPort.list();
-        const port = ports.find((item) => item.serialNumber === peripheralUuid);
+        const port = ports.find((item) => item.serialNumber === peripheralUuid
+            && item.vendorId === VENDOR_ID && item.productId === PRODUCT_ID);
 
         if (!port) {
             throw new Error(`Port with serial number ${peripheralUuid} not found`);

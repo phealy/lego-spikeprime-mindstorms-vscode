@@ -1,10 +1,50 @@
 import { BaseMessage } from "./base-message";
 
+export type TelemetryDevice =
+    | { type: "battery", level: number }
+    | {
+        type: "imu",
+        hubFaceUp: number,
+        yawFace: number,
+        yaw: number,
+        pitch: number,
+        roll: number,
+        accX: number,
+        accY: number,
+        accZ: number,
+        gyroX: number,
+        gyroY: number,
+        gyroZ: number,
+    }
+    | { type: "matrix5x5", pixels: number[] }
+    | {
+        type: "motor",
+        port: number,
+        deviceType: number,
+        absPosition: number,
+        power: number,
+        speed: number,
+        position: number,
+    }
+    | { type: "force", port: number, value: number, pressed: boolean }
+    | {
+        type: "color",
+        port: number,
+        color: number,
+        colorName: string,
+        reflected: number,
+        red: number,
+        green: number,
+        blue: number,
+    }
+    | { type: "distance", port: number, distance: number }
+    | { type: "matrix3x3", port: number, pixels: number[] };
+
 export class DeviceNotificationMessage extends BaseMessage {
     public static readonly Id = 0x3c;
 
     public payloadSize: number | undefined;
-    public devices: any[] = [];
+    public devices: TelemetryDevice[] = [];
 
     public deserialize(data: Uint8Array) {
         const view = new DataView(data.buffer);

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { pack, unpack } from "../cobs";
+import { HubDisconnectedError } from "../hub-operation";
 import { Logger } from "../logger";
 import { BaseMessage } from "../messages/base-message";
 import { ClearSlotRequestMessage } from "../messages/clear-slot-request-message";
@@ -380,7 +381,7 @@ export abstract class BaseClient {
         this._hubName = undefined;
         this._macAddress = undefined;
         this._isConnectionLogged = false;
-        this.rejectPendingMessages(new Error("Hub disconnected during a request."));
+        this.rejectPendingMessages(new HubDisconnectedError());
 
         this.onClosed.fire();
     }

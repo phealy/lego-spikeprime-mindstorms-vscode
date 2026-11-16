@@ -4,14 +4,22 @@ import * as os from "os";
 import * as path from "path";
 import * as shellQuote from "shell-quote";
 import { v7 } from "uuid";
+import * as vscode from "vscode";
+
+import { HubDisconnectedError } from "./hub-operation";
 
 export function executeCustomPreprocessor(
     command: string,
     filePath: string,
     onStderr: (message: string) => void,
     timeoutMs = 30000,
+    cancellationToken?: vscode.CancellationToken,
 ): Promise<string> {
     return new Promise((resolve, reject) => {
+        if (cancellationToken?.isCancellationRequested) {
+            reject(new HubDisconnectedError());
+            return;
+        }
         const [executable, ...args] = shellQuote.parse(command);
         if (!executable) {
             reject(new Error("Custom preprocessor command is empty."));
@@ -48,16 +56,26 @@ export function executeCustomPreprocessor(
             }
             reject(failure);
         }, timeoutMs);
+        const cancellation = cancellationToken?.onCancellationRequested(() => {
+            failure = new HubDisconnectedError();
+            clearTimeout(timeout);
+            if (!child.kill()) {
+                onStderr("Unable to terminate cancelled custom preprocessor.");
+                reject(failure);
+            }
+        });
         child.stderr?.on("data", data => {
             onStderr(`Custom preprocessor error: ${data.toString().trimEnd()}\n`);
         });
         child.on("error", error => {
             failure = error;
             clearTimeout(timeout);
+            cancellation?.dispose();
             reject(error);
         });
         child.on("close", (code, signal) => {
             clearTimeout(timeout);
+            cancellation?.dispose();
             if (failure || code !== 0) {
                 try {
                     fs.rmSync(outputPath);

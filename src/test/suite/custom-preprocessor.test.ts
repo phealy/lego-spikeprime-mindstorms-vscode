@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as vscode from "vscode";
 
 import { executeCustomPreprocessor } from "../../custom-preprocessor";
 
@@ -25,11 +26,11 @@ suite("Custom Preprocessor Test Suite", () => {
         });
     });
 
-    const run = (source: string, timeoutMs = 30000) => {
+    const run = (source: string, timeoutMs = 30000, token?: vscode.CancellationToken) => {
         fs.writeFileSync(script, source);
         const executable = process.env.npm_node_execpath ?? process.execPath;
         const command = `"${executable.replace(/\\/g, "\\\\")}" "${script.replace(/\\/g, "\\\\")}"`;
-        return executeCustomPreprocessor(command, input, message => assert.fail(message), timeoutMs);
+        return executeCustomPreprocessor(command, input, message => assert.fail(message), timeoutMs, token);
     };
 
     test("Preserves stdin/stdout preprocessing", async () => {
@@ -57,5 +58,18 @@ suite("Custom Preprocessor Test Suite", () => {
         const started = Date.now();
         await assert.rejects(run("setInterval(() => {}, 1000);", 100), /timed out after 0.1 seconds/);
         assert.ok(Date.now() - started < 2000);
+    });
+
+    test("Disconnect cancellation terminates a running preprocessor", async () => {
+        const cancellation = new vscode.CancellationTokenSource();
+        try {
+            const result = run("setInterval(() => {}, 1000);", 30000, cancellation.token);
+            const rejected = assert.rejects(result, /disconnected/);
+            cancellation.cancel();
+            await rejected;
+        }
+        finally {
+            cancellation.dispose();
+        }
     });
 });

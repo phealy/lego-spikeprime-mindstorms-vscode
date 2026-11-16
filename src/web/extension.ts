@@ -2,6 +2,9 @@ import * as mpy from "@pybricks/mpy-cross-v6";
 
 import * as vscode from "vscode";
 
+import { disconnectChatClient, registerChatConnectionTools } from "../chat-connection-tools";
+import { registerChatTools } from "../chat-tools";
+import { HubDisconnectedError, HubOperation } from "../hub-operation";
 import {
     clearProgramSlot,
     configureRawMessageLogging,
@@ -16,6 +19,7 @@ import {
     startProgramInSlot,
     uploadFileToHub,
     uploadProgramToHub,
+    withHubOperation,
     withUploadProgress,
 } from "../shared-extension";
 import {
@@ -35,22 +39,58 @@ export async function activate(context: vscode.ExtensionContext) {
     configureRawMessageLogging(context);
 
     registerSharedCommands(context);
+    registerChatTools(context, (document, slot, includes, progress, operation) =>
+        performUploadProgram(slot, includes, progress, operation, document),
+    );
+    let connectionAttemptInProgress = false;
+    const connectUsb = async (token?: vscode.CancellationToken) => {
+        if (connectionAttemptInProgress || getClient()?.isConnectedIn) {
+            throw new Error("A hub is connected or a connection is already in progress.");
+        }
+        connectionAttemptInProgress = true;
+        initClient(WebUsbClient);
+        const connecting = getClient()!;
+        const operation = new HubOperation(connecting, token);
+        try {
+            operation.check();
+            await connecting.connect("");
+            operation.check();
+            await operation.wait(onHubConnected);
+        }
+        catch (error) {
+            if (connecting.isConnectedIn) {
+                await disconnectChatClient(connecting);
+            }
+            throw error;
+        }
+        finally {
+            operation.dispose();
+            connectionAttemptInProgress = false;
+        }
+    };
+    registerChatConnectionTools(context, {
+        connectUsb: async (id, token) => {
+            if (id) {
+                throw new Error("Web USB connections use the browser device chooser; omit connectionId.");
+            }
+            await connectUsb(token);
+        },
+    });
 
     const connectToHubCommand = vscode.commands.registerCommand(Command.ConnectToHub, async () => {
         try {
-            initClient(WebUsbClient);
-
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
                     title: "Connecting to Hub...",
                 },
-                () => getClient()!.connect(""),
+                () => connectUsb(),
             );
-
-            await onHubConnected();
         }
         catch (e) {
+            if (e instanceof HubDisconnectedError) {
+                return;
+            }
             console.error(e);
             vscode.window.showErrorMessage("Connecting to Hub Failed!" + (e instanceof Error ? ` ${e.message}` : ""));
         }
@@ -63,36 +103,43 @@ export async function activate(context: vscode.ExtensionContext) {
         }
 
         try {
-            const programInfo = await getProgramInfo();
-            if (!programInfo) {
-                return;
-            }
+            await withHubOperation(async operation => {
+                const programInfo = await getProgramInfo(operation);
+                if (!programInfo) {
+                    return;
+                }
 
-            await withUploadProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: programInfo.isAutostartIn
-                        ? "Uploading and running program..."
-                        : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
-                },
-                async (progress) => {
-                    await performUploadProgram(
-                        programInfo.slotId,
-                        programInfo.includeFileNames,
-                        progress,
-                    );
-                    if (programInfo.isAutostartIn) {
-                        await setTimeoutAsync(() => { /* noop */ }, 250);
-                        await startProgramInSlot(programInfo.slotId, false);
-                    }
-                },
-            );
+                await withUploadProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: programInfo.isAutostartIn
+                            ? "Uploading and running program..."
+                            : `Uploading Program to Hub (Slot #${programInfo.slotId})...`,
+                    },
+                    async (progress) => {
+                        await performUploadProgram(
+                            programInfo.slotId,
+                            programInfo.includeFileNames,
+                            progress,
+                            operation,
+                        );
+                        if (programInfo.isAutostartIn) {
+                            await operation.wait(() => setTimeoutAsync(() => { /* noop */ }, 250));
+                            await startProgramInSlot(programInfo.slotId, false, operation);
+                        }
+                    },
+                    operation,
+                );
 
-            if (!programInfo.isAutostartIn) {
-                vscode.window.showInformationMessage("Program uploaded!");
-            }
+                if (!programInfo.isAutostartIn) {
+                    vscode.window.showInformationMessage("Program uploaded!");
+                }
+            });
         }
         catch (e) {
+            if (e instanceof HubDisconnectedError) {
+                return;
+            }
             console.error(e);
             vscode.window.showErrorMessage("Program Upload Failed!" + (e instanceof Error ? ` ${e.message}` : ""));
         }
@@ -136,17 +183,17 @@ async function performUploadProgram(
     slotId: number,
     includeFileNames: string[],
     progress?: vscode.Progress<{ increment: number }>,
+    operation?: HubOperation,
+    document = vscode.window.activeTextEditor?.document,
 ) {
-    const editor = vscode.window.activeTextEditor;
+    operation?.check();
     const config = vscode.workspace.getConfiguration();
     const logger = getLogger();
 
-    if (!editor) {
-        vscode.window.showInformationMessage("Please open a file");
-        return;
+    if (!document) {
+        throw new Error("Please open a file");
     }
 
-    const document = editor.document;
     const documentContent = document.getText();
     const compileBeforeUpload = config.get<boolean>(
         "legoSpikePrimeMindstorms.compileBeforeUpload",
@@ -170,15 +217,17 @@ async function performUploadProgram(
         documentContent,
         includeFiles,
     );
+    operation?.check();
 
     let compileResult: mpy.CompileResult | undefined;
     if (compileBeforeUpload) {
-        compileResult = await mpy.compile(
+        const compile = () => mpy.compile(
             document.fileName,
             documentContent,
             [],
             wasmUri.toString(),
         );
+        compileResult = await (operation ? operation.wait(compile) : compile());
 
         if (compileResult?.status !== 0) {
             logger?.error(formatProgramLog(
@@ -199,8 +248,9 @@ async function performUploadProgram(
         [...includeFiles, ...importedFiles],
         compileBeforeUpload,
         slotId,
+        operation,
     );
-    await clearProgramSlot(slotId);
+    await clearProgramSlot(slotId, operation);
     for (const auxiliaryFile of auxiliaryFiles) {
         await uploadFileToHub(
             auxiliaryFile.data,
@@ -208,6 +258,7 @@ async function performUploadProgram(
             slotId,
             undefined,
             auxiliaryFile.sourceName,
+            operation,
         );
     }
     await uploadProgramToHub(
@@ -216,6 +267,7 @@ async function performUploadProgram(
         slotId,
         !!compileResult?.mpy,
         progress,
+        operation,
     );
 }
 
@@ -223,22 +275,25 @@ async function prepareAuxiliaryFiles(
     files: Array<{ name: string, data: Uint8Array }>,
     compileBeforeUpload: boolean,
     slotId: number,
+    operation?: HubOperation,
 ): Promise<Array<{ name: string, sourceName: string, data: Uint8Array }>> {
     const logger = getLogger();
     const preparedFiles: Array<{ name: string, sourceName: string, data: Uint8Array }> = [];
 
     for (const file of files) {
+        operation?.check();
         if (!compileBeforeUpload || !file.name.toLowerCase().endsWith(".py")) {
             preparedFiles.push({ ...file, sourceName: file.name });
             continue;
         }
 
-        const compileResult = await mpy.compile(
+        const compile = () => mpy.compile(
             file.name,
             new TextDecoder().decode(file.data),
             [],
             wasmUri.toString(),
         );
+        const compileResult = await (operation ? operation.wait(compile) : compile());
         if (compileResult.status !== 0 || !compileResult.mpy) {
             logger?.error(formatProgramLog(
                 slotId,
